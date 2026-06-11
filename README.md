@@ -148,7 +148,7 @@ All thresholds are configurable per domain in `config/domains.py`.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/traceback.git
+git clone https://github.com/ang535/Traceback.git
 cd traceback
 
 # 2. Create a virtual environment
