@@ -135,18 +135,6 @@ All thresholds are configurable per domain in `config/domains.py`.
 
 ---
 
-## Build Milestones
-
-| Milestone | Description | Status |
-|---|---|---|
-| 1 | Repo setup, structure, config scaffolding | ✅ Done |
-| 2 | Coding agent (LangGraph + Claude, 3 tools) | 🔲 Pending |
-| 3 | Trajectory logger + state snapshots | 🔲 Pending |
-| 4 | Anomaly detector + severity scorer + rollback | 🔲 Pending |
-| 5 | Streamlit dashboard + testing | 🔲 Pending |
-
----
-
 ## Research Claims
 
 1. **Domain-agnostic detection** — semantic, statistical, and relative measures that adapt to any agent without redesigning detection logic
