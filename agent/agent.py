@@ -1,21 +1,19 @@
 import os
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from agent.tools import TOOLS
 
 load_dotenv()
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"  # use "deepseek-reasoner" for the R1 reasoning model
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 def build_agent():
-    """Build and return the LangGraph coding agent, powered by DeepSeek."""
-    llm = ChatOpenAI(
-        model=DEEPSEEK_MODEL,
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=DEEPSEEK_BASE_URL,
+    """Build and return the LangGraph coding agent, powered by Gemini."""
+    llm = ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL,
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
     )
     agent = create_react_agent(llm, TOOLS)
     return agent
