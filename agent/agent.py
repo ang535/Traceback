@@ -6,7 +6,7 @@ from agent.tools import TOOLS
 
 load_dotenv()
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 
 def build_agent():
