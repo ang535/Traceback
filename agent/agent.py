@@ -2,11 +2,22 @@ import os
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
+
 from agent.tools import TOOLS
+from monitor.validator import validate_task, check_first_step_validity
+from monitor.logger import TrajectoryLogger
+from monitor.detector import run_all_detectors
+from monitor.scorer import calculate_severity
+from monitor.rollback import RollbackManager
+from monitor.cost_tracker import CostTracker
+from monitor.completion_check import finalize_run
 
 load_dotenv()
 
 GEMINI_MODEL = "gemini-2.5-flash-lite"
+
+ROLLBACK_SEVERITY_THRESHOLD = 0.8
+MAX_TOTAL_STEPS = 25  # hard safety cap, independent of rollback retry limits
 
 
 def build_agent():
@@ -19,25 +30,176 @@ def build_agent():
     return agent
 
 
+def _extract_step_info(message) -> dict | None:
+    """Convert a LangGraph message into the (tool_used, input, output, tokens) shape.
+
+    Returns None for messages that don't represent a tool call or tool result
+    (e.g. the agent's intermediate reasoning text with no tool use).
+    """
+    msg_type = getattr(message, "type", None)
+
+    if msg_type == "ai" and getattr(message, "tool_calls", None):
+        # one AI message can contain multiple tool calls; we handle the common
+        # case of one tool call per step, which matches our 3-tool design
+        call = message.tool_calls[0]
+        token_count = 0
+        usage = getattr(message, "usage_metadata", None)
+        if usage:
+            token_count = usage.get("total_tokens", 0)
+        return {
+            "tool_used": call["name"],
+            "input_summary": call["args"],
+            "output_summary": None,  # filled in when the matching ToolMessage arrives
+            "token_count": token_count,
+        }
+
+    if msg_type == "tool":
+        return {
+            "tool_used": getattr(message, "name", "unknown_tool"),
+            "input_summary": None,  # already captured by the preceding AI message
+            "output_summary": str(message.content)[:500],
+            "token_count": 0,
+        }
+
+    return None
+
+
 def run_agent(task: str) -> dict:
-    """Run the coding agent on a task and return the final state.
+    """Run the coding agent on a task, with full trajectory monitoring.
+
+    Validates the task, runs the agent step by step (rather than as one
+    opaque call), logging and checking every step for anomalies, triggering
+    rollback when severity crosses threshold, and verifying completion
+    against real logged data rather than the agent's self-report.
 
     Args:
-        task: A natural language description of the coding task,
-              e.g. "Fix the bug in tasks/buggy_add.py"
+        task: A natural language description of the coding task.
 
     Returns:
-        The final LangGraph state dict containing messages and output.
+        A dict describing the final outcome: status, message, warning (if
+        any), and the full trajectory log for inspection or display.
     """
+    validation = validate_task(task)
+    if not validation["valid"]:
+        return {"status": "rejected", "message": validation["reason"], "trajectory": []}
+
+    logger = TrajectoryLogger()
+    cost_tracker = CostTracker()
+    rollback_manager = RollbackManager()
+
     agent = build_agent()
-    initial_state = {"messages": [{"role": "user", "content": task}]}
-    final_state = agent.invoke(initial_state)
-    return final_state
+    messages = [{"role": "user", "content": task}]
+    rollback_status = None
+    final_ai_message = ""
+    pending_tool_call = None  # holds tool_used/input until the matching ToolMessage arrives
+
+    total_steps_taken = 0
+
+    while total_steps_taken < MAX_TOTAL_STEPS:
+        produced_any_step = False
+
+        for chunk in agent.stream({"messages": messages}, stream_mode="values"):
+            latest_message = chunk["messages"][-1]
+            info = _extract_step_info(latest_message)
+
+            if info is None:
+                if getattr(latest_message, "type", None) == "ai":
+                    final_ai_message = latest_message.content
+                continue
+
+            if info["output_summary"] is None:
+                # this is the AI's tool-call announcement; hold onto it until
+                # the corresponding ToolMessage arrives with the real output
+                pending_tool_call = info
+                continue
+
+            # this is a ToolMessage; merge it with the pending call info
+            if pending_tool_call:
+                merged = {
+                    "tool_used": pending_tool_call["tool_used"],
+                    "input_summary": pending_tool_call["input_summary"],
+                    "output_summary": info["output_summary"],
+                    "token_count": pending_tool_call["token_count"],
+                }
+                pending_tool_call = None
+            else:
+                merged = info
+
+            entry = logger.log_step(
+                tool_used=merged["tool_used"],
+                input_summary=merged["input_summary"],
+                output_summary=merged["output_summary"],
+                token_count=merged["token_count"],
+            )
+            cost_tracker.log_step(merged["token_count"])
+            total_steps_taken += 1
+            produced_any_step = True
+
+            active_trajectory = logger.get_active_trajectory()
+
+            # first-step file-existence check
+            if len(active_trajectory) == 1:
+                first_step_check = check_first_step_validity(entry)
+                if first_step_check["status"] == "halted":
+                    return {
+                        "status": "rejected",
+                        "message": first_step_check["reason"],
+                        "trajectory": active_trajectory,
+                    }
+
+            prior_trajectory = active_trajectory[:-1]
+            anomalies = run_all_detectors(task, prior_trajectory, entry)
+
+            if anomalies:
+                severity = calculate_severity(anomalies)
+                if severity >= ROLLBACK_SEVERITY_THRESHOLD:
+                    discarded_before = [s for s in logger.get_full_log() if not s["is_active"]]
+
+                    rollback_result = rollback_manager.attempt_rollback(
+                        anomalies=anomalies,
+                        severity=severity,
+                        trajectory=active_trajectory,
+                        original_goal=task,
+                        logger=logger,
+                    )
+
+                    discarded_after = [s for s in logger.get_full_log() if not s["is_active"]]
+                    newly_discarded = discarded_after[len(discarded_before):]
+                    if newly_discarded:
+                        cost_tracker.log_rollback(newly_discarded)
+
+                    if rollback_result["status"] == "escalated":
+                        rollback_status = "escalated"
+                        break
+
+                    # resume with the corrective instruction injected
+                    messages = [
+                        {"role": "user", "content": task},
+                        {"role": "user", "content": rollback_result["correction_message"]},
+                    ]
+                    break  # restart the stream loop with the new message history
+
+        if rollback_status == "escalated":
+            break
+        if not produced_any_step:
+            break  # the agent finished naturally with no new tool call
+
+    final_trajectory = logger.get_active_trajectory()
+    result = finalize_run(final_trajectory, final_ai_message, rollback_status)
+    result["trajectory"] = final_trajectory
+    result["cost_summary"] = cost_tracker.summary()
+    return result
 
 
 if __name__ == "__main__":
-    # Quick smoke test — fix a buggy file
     task = "Read the file tasks/buggy_add.py, find the bug, fix it, and run it to confirm it works."
     result = run_agent(task)
-    for message in result["messages"]:
-        print(f"[{message.type}]: {message.content}\n")
+
+    print(f"\nStatus: {result['status']}")
+    print(f"Message: {result['message']}")
+    if result.get("warning"):
+        print(f"Warning: {result['warning']}")
+    print(f"\nCost summary: {result.get('cost_summary')}")
+    print(f"\nTrajectory ({len(result['trajectory'])} steps):")
+    for step in result["trajectory"]:
+        print(f"  [{step['step_number']}] {step['tool_used']}: {str(step['input_summary'])[:80]}")
