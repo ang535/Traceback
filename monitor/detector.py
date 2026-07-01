@@ -1,9 +1,24 @@
+import re
 import numpy as np
 from monitor.embeddings import get_embedding_model
 
 MIN_STEPS_FOR_TOKEN_CHECK = 3
 ABSOLUTE_TOKEN_CEILING = 4000
 LOOP_REPETITION_THRESHOLD = 3
+
+# A wrong-file mismatch is only flagged if similarity ALSO falls below this
+# more lenient bar. This lets genuinely related-but-unnamed files (a
+# dependency, a test file, a backup variant) pass, while still catching
+# wrong files that are both unnamed AND semantically unrelated.
+# Empirically set at 0.65 based on real observed similarity scores: wrong-file
+# cases like "buggy_add.py" vs "buggy_multiply.py" scored 0.55-0.65 under
+# all-MiniLM-L6-v2, well above what a 0.4-0.5 threshold would catch.
+RELATED_FILE_LENIENCY_THRESHOLD = 0.65
+
+# Matches filename-like tokens: word chars / slashes / hyphens, a dot, then
+# more word chars. Same pattern used in monitor/validator.py's validate_task,
+# kept consistent so both checks recognize filenames the same way.
+FILENAME_PATTERN = r"[\w/\-]+\.\w+"
 
 
 def describe_step(step: dict) -> str:
@@ -37,7 +52,135 @@ def describe_step(step: dict) -> str:
         return str(step.get("output_summary", ""))[:200]
 
 
-def check_goal_drift(original_goal: str, current_step: dict, trajectory: list, threshold: float = 0.4) -> dict | None:
+def extract_filenames(text: str) -> set:
+    """Extract every filename-shaped token from a piece of text.
+
+    Used to compare which specific files the original task named against
+    which specific file the current step actually targeted — a deterministic
+    check that catches cases embedding similarity structurally cannot:
+    two sentences about "fixing a buggy file" can be nearly identical in
+    meaning even when they name two completely different files.
+
+    Args:
+        text: Any string — a task description, or a step's input/description.
+
+    Returns:
+        A set of filename-shaped substrings found in the text.
+    """
+    return set(re.findall(FILENAME_PATTERN, str(text)))
+
+
+def get_step_target_filename(step: dict) -> str | None:
+    """Extract the specific file a step actually acted on, if any.
+
+    Args:
+        step: A logged step dict.
+
+    Returns:
+        The filepath string if one can be determined, otherwise None.
+    """
+    input_summary = step.get("input_summary")
+    if isinstance(input_summary, dict) and "filepath" in input_summary:
+        return input_summary["filepath"]
+    if isinstance(input_summary, str):
+        found = extract_filenames(input_summary)
+        if found:
+            return next(iter(found))
+    return None
+
+
+def check_wrong_target_file(original_goal: str, current_step: dict, similarity_score: float | None = None,
+                             leniency_threshold: float = RELATED_FILE_LENIENCY_THRESHOLD) -> dict | None:
+    """Check whether the step's target file is both unnamed AND unrelated to the task.
+
+    This is a combined check: it starts from a deterministic, string-based
+    signal (does the step's file match a file actually named in the task)
+    but does NOT flag a mismatch on its own anymore. A mismatch only becomes
+    an anomaly if the file is ALSO not similar enough to the task semantically
+    (similarity_score below leniency_threshold).
+
+    This avoids false positives on legitimate exploration of related-but-
+    unnamed files (a dependency, a test file, a backup variant) — those
+    typically still score reasonably high similarity even though they weren't
+    explicitly named — while still catching files that are both unnamed AND
+    clearly unrelated, which is exactly the gap pure embedding similarity
+    misses (e.g. buggy_add.py vs buggy_multiply.py score similarly high under
+    cosine similarity despite only one being correct).
+
+    Args:
+        original_goal: The task description the user originally submitted.
+        current_step: The step currently being checked.
+        similarity_score: The cosine similarity already computed by
+                           check_goal_drift for this same step, reused here
+                           rather than recomputed. If None, the function falls
+                           back to the original strict (string-only) behavior.
+        leniency_threshold: A mismatch is only flagged if similarity falls
+                             below this value. More lenient than DRIFT_THRESHOLD
+                             on purpose — this check should only fire when both
+                             signals agree something is wrong.
+
+    Returns:
+        An anomaly dict if the step's file is both an unnamed mismatch AND
+        below the leniency threshold, otherwise None.
+    """
+    task_filenames = extract_filenames(original_goal)
+    if not task_filenames:
+        return None  # task never named a specific file — nothing to compare against
+
+    step_target = get_step_target_filename(current_step)
+    if step_target is None:
+        return None  # this step didn't target a specific file (e.g. a reasoning step)
+
+    # normalize by comparing just the basename, so "tasks/buggy_add.py" and
+    # "buggy_add.py" are correctly treated as the same file
+    task_basenames = {f.split("/")[-1] for f in task_filenames}
+    step_basename = step_target.split("/")[-1]
+
+    is_mismatch = step_basename not in task_basenames
+    if not is_mismatch:
+        return None  # correct file — nothing to flag regardless of similarity
+
+    # a mismatch alone is no longer enough — only flag if the file is ALSO
+    # not similar enough to plausibly be reasonable, related exploration
+    if similarity_score is not None and similarity_score >= leniency_threshold:
+        return None  # wrong file, but similar enough to the task to let it slide
+
+    return {
+        "type": "wrong_target_file",
+        "step": current_step["step_number"],
+        "expected_files": list(task_basenames),
+        "actual_file": step_basename,
+        "similarity_score": similarity_score,
+    }
+
+
+def compute_goal_similarity(original_goal: str, current_step: dict) -> float:
+    """Compute the raw cosine similarity between the task and a step's description.
+
+    Separated out from check_goal_drift so the same similarity score can be
+    reused by check_wrong_target_file without recomputing it — embedding a
+    sentence is the most expensive part of either check.
+
+    Args:
+        original_goal: The task description the user originally submitted.
+        current_step: The step currently being checked.
+
+    Returns:
+        A float cosine similarity between -1.0 and 1.0.
+    """
+    model = get_embedding_model()
+    step_description = describe_step(current_step)
+
+    embeddings = model.encode([original_goal, step_description])
+    similarity = float(
+        np.dot(embeddings[0], embeddings[1])
+        / (np.linalg.norm(embeddings[0]) * np.linalg.norm(embeddings[1]))
+    )
+    return similarity
+
+
+def check_goal_drift(original_goal: str, current_step: dict, trajectory: list,
+                      threshold: float = 0.6, similarity_score: float | None = None) -> dict | None:
     """Check whether the current step has semantically drifted from the original goal.
 
     On the very first step, this still runs, but the result is marked with
@@ -51,18 +194,13 @@ def check_goal_drift(original_goal: str, current_step: dict, trajectory: list, t
         trajectory: The full active trajectory so far, used to determine
                     whether this is the first step.
         threshold: Cosine similarity below this value is flagged as drift.
+        similarity_score: A pre-computed similarity score, if already
+                           available, to avoid recomputing it.
 
     Returns:
         An anomaly dict if drift is detected, otherwise None.
     """
-    model = get_embedding_model()
-    step_description = describe_step(current_step)
-
-    embeddings = model.encode([original_goal, step_description])
-    similarity = float(
-        np.dot(embeddings[0], embeddings[1])
-        / (np.linalg.norm(embeddings[0]) * np.linalg.norm(embeddings[1]))
-    )
+    similarity = similarity_score if similarity_score is not None else compute_goal_similarity(original_goal, current_step)
 
     is_first_step = len(trajectory) <= 1
 
@@ -71,7 +209,7 @@ def check_goal_drift(original_goal: str, current_step: dict, trajectory: list, t
             "type": "goal_drift",
             "step": current_step["step_number"],
             "similarity_score": similarity,
-            "drifted_target": step_description,
+            "drifted_target": describe_step(current_step),
             "confidence": "low" if is_first_step else "normal",
         }
     return None
@@ -184,9 +322,17 @@ def run_all_detectors(original_goal: str, trajectory: list, current_step: dict) 
     """
     anomalies = []
 
-    drift = check_goal_drift(original_goal, current_step, trajectory + [current_step])
+    # compute similarity once, shared between check_goal_drift and
+    # check_wrong_target_file — avoids embedding the same sentence twice
+    similarity_score = compute_goal_similarity(original_goal, current_step)
+
+    drift = check_goal_drift(original_goal, current_step, trajectory + [current_step], similarity_score=similarity_score)
     if drift:
         anomalies.append(drift)
+
+    wrong_file = check_wrong_target_file(original_goal, current_step, similarity_score=similarity_score)
+    if wrong_file:
+        anomalies.append(wrong_file)
 
     loop = check_infinite_loop(trajectory + [current_step])
     if loop:
@@ -200,4 +346,4 @@ def run_all_detectors(original_goal: str, trajectory: list, current_step: dict) 
     if token_ceiling:
         anomalies.append(token_ceiling)
 
-    return anomalies
+    return anomalies 
