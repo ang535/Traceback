@@ -90,10 +90,33 @@ def score_token_explosion(anomaly: dict, min_ratio: float = TOKEN_MIN_RATIO,
     return max(floor, min(severity, 1.0))
 
 
+def score_wrong_target_file(anomaly: dict) -> float:
+    """Score a wrong_target_file anomaly.
+
+    Unlike the other checks, this is a deterministic, binary signal — the
+    step's target file either matches a file named in the task, or it
+    doesn't. There's no "how wrong" gradient to scale by (a wrong file is
+    a wrong file), so this returns a flat, high severity rather than a
+    magnitude-scaled one.
+
+    This is intentionally high — higher than goal_drift's typical scores —
+    because this check only ever fires on a confident, exact mismatch with
+    no ambiguity, unlike embedding similarity which can be uncertain.
+
+    Args:
+        anomaly: A wrong_target_file anomaly dict.
+
+    Returns:
+        A fixed float severity (0.7).
+    """
+    return 0.7
+
+
 SCORERS = {
     "goal_drift": score_goal_drift,
     "infinite_loop": score_infinite_loop,
     "token_explosion": score_token_explosion,
+    "wrong_target_file": score_wrong_target_file,
 }
 
 
