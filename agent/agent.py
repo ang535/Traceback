@@ -14,7 +14,7 @@ from monitor.completion_check import finalize_run
 
 load_dotenv()
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 ROLLBACK_SEVERITY_THRESHOLD = 0.8
 MAX_TOTAL_STEPS = 25  # hard safety cap, independent of rollback retry limits
