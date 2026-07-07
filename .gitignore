@@ -2,4 +2,4 @@
 venv/
 __pycache__/
 *.pyc
-.env
+.envtests/fixtures/loop_baseline_results.json
