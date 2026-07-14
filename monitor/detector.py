@@ -1,10 +1,36 @@
 import re
 import numpy as np
-from monitor.embeddings import get_embedding_model
+# get_embedding_model is imported lazily inside compute_goal_similarity rather
+# than at module load time — it pulls in sentence-transformers/torch, which is
+# only needed when a goal-drift/wrong-file check actually runs. Keeping it out
+# of the module-level import lets anything that just imports monitor.detector
+# (e.g. agent.agent, or scripts that only exercise other detectors) work
+# without that heavy dependency being installed.
 
 MIN_STEPS_FOR_TOKEN_CHECK = 3
 ABSOLUTE_TOKEN_CEILING = 4000
 LOOP_REPETITION_THRESHOLD = 3
+
+# Empirically set at 0.6 via a 50-scenario labeled benchmark + threshold
+# sweep (F1=0.833). Was previously an inline literal default on
+# check_goal_drift rather than a named constant — promoted here so
+# monitor/scorer.py can import the real validated value instead of keeping
+# its own independent (and, until now, inconsistent) copy.
+DRIFT_THRESHOLD = 0.6
+
+# Empirically set at 2.2 via tests/measure_token_baseline.py +
+# tests/tune_token_threshold_real.py, run against real agent trajectories
+# (openai/gpt-oss-20b on Groq) across MULTIPLE trials and MULTIPLE distinct
+# tasks (two different one-line bug fixes, run twice each; a structural
+# large-output task run five times): the pooled clean ceiling across all
+# clean trials was 1.73 (converged consistently across both clean task
+# variants), while the weakest of several verbose-task spikes was 2.67.
+# 2.2 is the margin-balanced midpoint of that gap — deliberately not the
+# smallest value that would still separate the two (which would sit with
+# zero margin against clean-run variance the trials didn't happen to
+# sample), giving real headroom on both sides instead. Kept in sync with
+# monitor/scorer.py's TOKEN_MIN_RATIO, which scales severity off the same value.
+TOKEN_MIN_RATIO = 2.2
 
 # A wrong-file mismatch is only flagged if similarity ALSO falls below this
 # more lenient bar. This lets genuinely related-but-unnamed files (a
@@ -168,6 +194,8 @@ def compute_goal_similarity(original_goal: str, current_step: dict) -> float:
     Returns:
         A float cosine similarity between -1.0 and 1.0.
     """
+    from monitor.embeddings import get_embedding_model
+
     model = get_embedding_model()
     step_description = describe_step(current_step)
 
@@ -180,7 +208,7 @@ def compute_goal_similarity(original_goal: str, current_step: dict) -> float:
 
 
 def check_goal_drift(original_goal: str, current_step: dict, trajectory: list,
-                      threshold: float = 0.6, similarity_score: float | None = None) -> dict | None:
+                      threshold: float = DRIFT_THRESHOLD, similarity_score: float | None = None) -> dict | None:
     """Check whether the current step has semantically drifted from the original goal.
 
     On the very first step, this still runs, but the result is marked with
@@ -249,7 +277,7 @@ def check_infinite_loop(trajectory: list, threshold: int = LOOP_REPETITION_THRES
     return None
 
 
-def check_token_explosion(trajectory: list, current_step: dict, multiplier: float = 3.0) -> dict | None:
+def check_token_explosion(trajectory: list, current_step: dict, multiplier: float = TOKEN_MIN_RATIO) -> dict | None:
     """Check whether the current step's token usage spikes relative to recent history.
 
     Requires at least MIN_STEPS_FOR_TOKEN_CHECK prior steps before this check

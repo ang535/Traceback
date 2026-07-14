@@ -1,16 +1,36 @@
+from monitor.detector import DRIFT_THRESHOLD  # noqa: F401 — re-exported; see note below
+
 LOW_CONFIDENCE_PENALTY = 0.5  # how much a "low confidence" flag gets discounted
 DIMINISHING_RETURNS_RATE = 0.3  # each additional anomaly closes 30% of the remaining gap to 1.0
 
 # Tuning constants for each detector's magnitude-to-severity mapping.
 # These define the scale, not the per-anomaly outcome — the actual score is
 # always derived from the real numbers each detector measured.
-DRIFT_THRESHOLD = 0.4
+#
+# DRIFT_THRESHOLD used to be redefined here as 0.4, independently of
+# monitor.detector's real (empirically validated) cutoff of 0.6. That meant
+# any goal_drift anomaly with similarity between 0.4 and 0.6 — genuinely
+# flagged, since 0.6 is the actual detection cutoff — computed a NEGATIVE
+# severity via (0.4 - similarity) / 0.4, clamped to 0.0. A real band of
+# correctly-detected drift was silently scoring zero severity. Now imported
+# directly from monitor.detector so there's one source of truth.
 
 LOOP_MIN_THRESHOLD = 3   # repetitions needed to trigger the anomaly at all
 LOOP_SEVERITY_FLOOR = 0.5  # severity at exactly the minimum threshold
 LOOP_CAP_REPETITIONS = 6   # repetitions at which severity saturates to 1.0
 
-TOKEN_MIN_RATIO = 3.0     # ratio needed to trigger the anomaly at all
+# Empirically set at 2.2 via tests/measure_token_baseline.py +
+# tests/tune_token_threshold_real.py, run against real agent trajectories
+# (openai/gpt-oss-20b on Groq) across MULTIPLE trials and MULTIPLE distinct
+# tasks (two different one-line bug fixes, run twice each; a structural
+# large-output task run five times): the pooled clean ceiling across all
+# clean trials was 1.73 (converged consistently across both clean task
+# variants), while the weakest of several verbose-task spikes was 2.67.
+# 2.2 is the margin-balanced midpoint of that gap — deliberately not the
+# smallest value that would still separate the two (which would sit with
+# zero margin against clean-run variance the trials didn't happen to
+# sample), giving real headroom on both sides instead.
+TOKEN_MIN_RATIO = 2.2    # ratio needed to trigger the anomaly at all
 TOKEN_SEVERITY_FLOOR = 0.4  # severity at exactly the minimum ratio
 TOKEN_CAP_RATIO = 10.0    # ratio at which severity saturates to 1.0
 

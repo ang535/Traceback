@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 
 from agent.tools import TOOLS
@@ -14,6 +13,18 @@ from monitor.completion_check import finalize_run
 
 load_dotenv()
 
+# Which LLM backend build_agent() uses. "groq" is the default for testing —
+# Groq's free tier (1000 req/day) supports iterating on eval/tuning scripts
+# without hitting Gemini's 20 req/day free-tier ceiling. Switch to "gemini"
+# for production runs.
+PROVIDER = "groq"
+
+# llama-3.3-70b-versatile repeatedly emitted malformed, legacy-style function
+# call tags (<function=name{args}</function>) that Groq's API rejects with a
+# 400, even at temperature=0. Groq's own docs recommend the newer GPT-OSS
+# models for tool use — openai/gpt-oss-20b has full local tool-calling
+# support, is faster (~1000 t/s vs ~280 t/s), and is cheaper per token.
+GROQ_MODEL = "openai/gpt-oss-20b"
 GEMINI_MODEL = "gemini-2.5-flash"
 
 ROLLBACK_SEVERITY_THRESHOLD = 0.8
@@ -21,11 +32,31 @@ MAX_TOTAL_STEPS = 25  # hard safety cap, independent of rollback retry limits
 
 
 def build_agent():
-    """Build and return the LangGraph coding agent, powered by Gemini."""
-    llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-    )
+    """Build and return the LangGraph coding agent, powered by PROVIDER."""
+    if PROVIDER == "groq":
+        from langchain_groq import ChatGroq
+
+        llm = ChatGroq(
+            model=GROQ_MODEL,
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            # llama-3.3-70b-versatile occasionally emits a malformed,
+            # legacy-style function-call tag (<function=name{args}</function>)
+            # instead of a proper structured tool call, which Groq's API then
+            # rejects with a 400. This happens more often at higher sampling
+            # temperature; temperature=0 makes tool-call formatting far more
+            # reliable at the cost of response diversity we don't need here.
+            temperature=0,
+        )
+    elif PROVIDER == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+    else:
+        raise ValueError(f"Unknown PROVIDER: {PROVIDER!r}. Expected 'groq' or 'gemini'.")
+
     agent = create_react_agent(llm, TOOLS)
     return agent
 
@@ -81,7 +112,13 @@ def run_agent(task: str) -> dict:
     """
     validation = validate_task(task)
     if not validation["valid"]:
-        return {"status": "rejected", "message": validation["reason"], "trajectory": []}
+        return {
+            "status": "rejected",
+            "message": validation["reason"],
+            "trajectory": [],
+            "anomalies_by_step": {},
+            "rollback_history": [],
+        }
 
     logger = TrajectoryLogger()
     cost_tracker = CostTracker()
@@ -92,6 +129,10 @@ def run_agent(task: str) -> dict:
     rollback_status = None
     final_ai_message = ""
     pending_tool_call = None  # holds tool_used/input until the matching ToolMessage arrives
+    # keyed by step_number; only populated for steps where a detector actually
+    # fired, so the dashboard can show anomaly detail without needing to
+    # re-run detection itself
+    anomalies_by_step = {}
 
     total_steps_taken = 0
 
@@ -145,12 +186,15 @@ def run_agent(task: str) -> dict:
                         "status": "rejected",
                         "message": first_step_check["reason"],
                         "trajectory": active_trajectory,
+                        "anomalies_by_step": {},
+                        "rollback_history": [],
                     }
 
             prior_trajectory = active_trajectory[:-1]
             anomalies = run_all_detectors(task, prior_trajectory, entry)
 
             if anomalies:
+                anomalies_by_step[entry["step_number"]] = anomalies
                 severity = calculate_severity(anomalies)
                 if severity >= ROLLBACK_SEVERITY_THRESHOLD:
                     discarded_before = [s for s in logger.get_full_log() if not s["is_active"]]
@@ -188,6 +232,8 @@ def run_agent(task: str) -> dict:
     result = finalize_run(final_trajectory, final_ai_message, rollback_status)
     result["trajectory"] = final_trajectory
     result["cost_summary"] = cost_tracker.summary()
+    result["anomalies_by_step"] = anomalies_by_step
+    result["rollback_history"] = rollback_manager.rollback_history
     return result
 
 
