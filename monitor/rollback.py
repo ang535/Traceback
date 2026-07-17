@@ -103,9 +103,24 @@ def find_rollback_point(anomalies: list, trajectory: list, severity: float) -> i
         strategy = decide_rollback_strategy(anomaly["type"], severity)
 
         if strategy == "rollback_to_last_clean":
-            # for a loop, "last clean" is the step before the repetition began
+            # For a loop, "last clean" is the step before the repeating
+            # pattern began. That's repetition_count steps back ONLY when
+            # cycle_length is 1 (the pattern is a single step repeating).
+            # For a longer cycle (e.g. cycle_length=2, an alternating
+            # read/run pattern), the looped region actually spans
+            # cycle_length * repetition_count steps — using repetition_count
+            # alone under-corrects by a factor of cycle_length, landing the
+            # rollback INSIDE the loop instead of before it. Found live via
+            # tests/measure_rollback_behavior.py: a cycle_length=2 loop
+            # (repetition_count=3, a real 6-step loop) was rolling back only
+            # 3 steps to a point still mid-pattern, so the agent resumed
+            # inside the loop and immediately fell back into it — 3 times,
+            # identically, exhausting MAX_ROLLBACKS_PER_TASK on a task that
+            # should have been trivially recoverable.
             repetition_count = anomaly.get("repetition_count", 1)
-            candidate_points.append(max(0, current_step_number - repetition_count))
+            cycle_length = anomaly.get("cycle_length", 1)
+            loop_span = repetition_count * cycle_length
+            candidate_points.append(max(0, current_step_number - loop_span))
         else:  # rollback_one_step
             candidate_points.append(max(0, current_step_number - 1))
 
@@ -118,8 +133,11 @@ CORRECTION_TEMPLATES = {
         "Refocus specifically on: {original_goal}"
     ),
     "infinite_loop": (
-        "Your previous attempt repeated the same action multiple times without making progress. "
-        "Try a different approach instead of repeating the last action."
+        "Your previous attempt repeated the same action (or the same short cycle of actions, "
+        "like reading then re-running the same file) multiple times without making progress. "
+        "If your code already ran successfully, STOP — do not re-read or re-run it again to "
+        "double-check. Report that the task is complete instead. If it has not succeeded yet, "
+        "try a genuinely different approach instead of repeating the same steps."
     ),
     "token_explosion": (
         "Your previous attempt produced an unusually large response. "
