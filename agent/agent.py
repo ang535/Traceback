@@ -276,7 +276,7 @@ def run_agent(task: str) -> dict:
                     discarded_after = [s for s in logger.get_full_log() if not s["is_active"]]
                     newly_discarded = discarded_after[len(discarded_before):]
                     if newly_discarded:
-                        cost_tracker.log_rollback(newly_discarded)
+                        cost_tracker.log_trim(newly_discarded)
 
                     final_ai_message = (
                         final_ai_message
