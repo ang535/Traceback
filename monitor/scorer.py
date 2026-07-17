@@ -1,11 +1,57 @@
 from monitor.detector import DRIFT_THRESHOLD, LOOP_REPETITION_THRESHOLD  # noqa: F401 — re-exported; see notes below
 
-LOW_CONFIDENCE_PENALTY = 0.5  # how much a "low confidence" flag gets discounted
+# Checked via tests/tune_severity_formula_params.py: a sensitivity analysis
+# that reuses the labeled scenarios in tests/fixtures/severity_scenarios.py
+# (already validated against the real ROLLBACK_SEVERITY_THRESHOLD=0.45) as an
+# end-to-end check on the FINAL should_rollback decision, not just the raw
+# severity number. Unlike TOKEN_MIN_RATIO or ROLLBACK_SEVERITY_THRESHOLD,
+# these constants aren't independent thresholds with a clean labeled ground
+# truth of their own — they're internal shape parameters of
+# calculate_severity(), so this asks a different question: how much does
+# each one actually matter, given everything else at its real value?
+#
+# LOW_CONFIDENCE_PENALTY was the one real finding. At the old value (0.5), a
+# single low-confidence goal_drift signal (similarity=0.0, confidence="low")
+# computes severity exactly 0.5 — just over ROLLBACK_SEVERITY_THRESHOLD
+# (0.45), incorrectly triggering a rollback despite the whole point of the
+# penalty being to NOT overreact to one noisy signal alone. Sweeping
+# candidates [0.0, 0.25, 0.5, 0.75, 1.0] showed F1 improves from 0.929 to
+# 0.963 at 0.0 or 0.25, and stays there — both remove that false positive.
+# 0.25 was chosen over the more extreme 0.0: 0.0 fully zeroes out any
+# low-confidence signal even when corroborating with others, discarding real
+# information; 0.25 fixes the actual false positive (a low-confidence signal
+# ALONE) while still letting a low-confidence signal contribute a small
+# amount toward corroborating other anomalies, matching the project's stated
+# philosophy that "corroborating signals are stronger evidence than any one
+# of them alone."
+LOW_CONFIDENCE_PENALTY = 0.25  # how much a "low confidence" flag gets discounted
+
+# DIMINISHING_RETURNS_RATE: swept [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0] — F1
+# stayed at 0.929 (the ROLLBACK_SEVERITY_THRESHOLD-validated ceiling for this
+# scenario set) across the ENTIRE range. 0.3 kept as a reasonable mid-range
+# choice — the system is provably insensitive to this constant.
 DIMINISHING_RETURNS_RATE = 0.3  # each additional anomaly closes 30% of the remaining gap to 1.0
 
 # Tuning constants for each detector's magnitude-to-severity mapping.
 # These define the scale, not the per-anomaly outcome — the actual score is
 # always derived from the real numbers each detector measured.
+#
+# LOOP_SEVERITY_FLOOR: swept [0.3, 0.4, 0.5, 0.6, 0.7] — 0.5 and above all
+# score the best F1 (0.929); below 0.5 an isolated bare-minimum infinite_loop
+# stops clearing ROLLBACK_SEVERITY_THRESHOLD, missing the exact case
+# ROLLBACK_SEVERITY_THRESHOLD's own tuning was built around. 0.5 kept — the
+# smallest value in the robust range.
+#
+# LOOP_CAP_REPETITIONS: swept [4, 5, 6, 8, 10] — F1 constant at 0.929 across
+# the entire range. Kept at 6 as a reasonable mid-range choice.
+#
+# TOKEN_SEVERITY_FLOOR: swept [0.2, 0.3, 0.4, 0.5, 0.6] — 0.4 is the ONLY
+# value achieving the best F1 (0.929); both directions make it worse (0.2-0.3
+# miss a real case, 0.5-0.6 add false positives). Confirmed correct, not just
+# unexamined.
+#
+# TOKEN_CAP_RATIO: swept [6, 8, 10, 15, 20] — F1 constant at 0.929 across the
+# entire range. Kept at 10.0 as a reasonable mid-range choice.
 #
 # DRIFT_THRESHOLD used to be redefined here as 0.4, independently of
 # monitor.detector's real (empirically validated) cutoff of 0.6. That meant
@@ -106,7 +152,10 @@ def score_token_explosion(anomaly: dict, min_ratio: float = TOKEN_MIN_RATIO,
     """
     if anomaly.get("detection_method") == "absolute_ceiling" or "ratio" not in anomaly:
         # no rolling average existed yet — we know it's bad (it broke an
-        # absolute hard ceiling) but have no relative magnitude to scale by
+        # absolute hard ceiling) but have no relative magnitude to scale by.
+        # Checked via tests/tune_severity_formula_params.py: swept
+        # [0.4, 0.5, 0.6, 0.7, 0.8] against the labeled scenarios — F1 stays
+        # at the best value (0.929) for 0.5-0.8, only 0.4 is worse. 0.6 kept.
         return 0.6
 
     ratio = anomaly["ratio"]
@@ -128,6 +177,11 @@ def score_wrong_target_file(anomaly: dict) -> float:
     This is intentionally high — higher than goal_drift's typical scores —
     because this check only ever fires on a confident, exact mismatch with
     no ambiguity, unlike embedding similarity which can be uncertain.
+
+    Checked via tests/tune_severity_formula_params.py: swept
+    [0.5, 0.6, 0.7, 0.8, 0.9] against the labeled scenarios — F1 stays at
+    the best value (0.929) across the entire range. 0.7 kept as a
+    reasonable mid-range choice.
 
     Args:
         anomaly: A wrong_target_file anomaly dict.

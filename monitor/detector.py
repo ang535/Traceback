@@ -7,7 +7,43 @@ import numpy as np
 # (e.g. agent.agent, or scripts that only exercise other detectors) work
 # without that heavy dependency being installed.
 
-MIN_STEPS_FOR_TOKEN_CHECK = 3
+# Validated via tests/tune_token_detection_gating.py against the same real
+# Groq trial data TOKEN_MIN_RATIO was measured from (tests/fixtures/
+# token_baseline_results.json) — no new live runs needed. The old value (3)
+# meant the rolling-average check never activated until step 4, leaving a
+# real detection gap: verbose_buggy_add_trial4's genuine explosion (ratio
+# 3.92 at step 2, relative to just one prior data point) was invisible to
+# the rolling check for its entire 10-step trajectory, since by the time the
+# window opened at step 4 the early spike had already been diluted into the
+# rolling average. It was only ever caught at step 8, when an individual
+# step happened to cross ABSOLUTE_TOKEN_CEILING outright — 6 steps and
+# thousands of wasted tokens later than the ratio-based signal was already
+# real. Sweeping min_steps=[1,2,3,4,5] against all 4 clean and 3 verbose
+# real trials: zero false positives on any clean trial at ANY candidate
+# value, and detection gets strictly earlier as min_steps drops — 1 (the
+# lowest value that avoids dividing by zero on an empty trajectory) catches
+# every real spike at the earliest possible step (step 2) with no cost.
+# ABSOLUTE_TOKEN_CEILING's role narrows cleanly as a result: with
+# min_steps=1, the rolling check covers step 2 onward, leaving ONLY step 1
+# (which has no prior history at all) needing the absolute-ceiling backstop.
+MIN_STEPS_FOR_TOKEN_CHECK = 1
+
+# Measured, not just reasoned: tests/measure_first_step_baseline.py forced
+# a deliberately adversarial first step (write a 25-function file as the
+# very first action, no reading allowed first — the opposite of every real
+# task's step 1 in tests/fixtures/token_baseline_results.json, which were
+# all small read_file calls at 350-429 tokens). Run on real Groq trials
+# (openai/gpt-oss-20b): one valid trial produced a real step 1 of 2077
+# tokens — the largest real first-step token count observed in this
+# project, by a wide margin over the ordinary 350-429 range, and a genuine
+# stress test of what an unusually large-but-legitimate first action costs.
+# 4000 stayed safely above it (2077 is 52% of the ceiling — real margin is
+# ~1.9x against the most adversarial case measured, not the 9.3x the
+# ordinary-task data alone implied). No data suggests lowering it; nothing
+# in this project's task shape has come close to crossing it. Kept at 4000,
+# now genuinely tested rather than only reasoned. (A second trial run in the
+# same session produced 0 steps — the model didn't make a tool call at all
+# that run, unrelated to token counting; noted but not chased further here.)
 ABSOLUTE_TOKEN_CEILING = 4000
 LOOP_REPETITION_THRESHOLD = 3
 

@@ -1,0 +1,21 @@
+[
+  {
+    "label": "explosive_first_step_trial1",
+    "task": "Without reading any files first, create a new file tasks/big_first_step.py containing exactly 25 separate functions named function_1 through function_25. Each function must take two integer parameters and return their sum, with a one-line docstring above each function describing what it does. Write the ENTIRE file in a single write_file call as your very first action \u2014 do not call read_file at all before writing. After writing the file, run it to confirm it executes without error (a __main__ block calling a couple of the functions and printing the results is enough).",
+    "steps": 2,
+    "token_counts": [
+      2077,
+      1463
+    ],
+    "first_step_tool": "write_file",
+    "step1_tokens": 2077
+  },
+  {
+    "label": "explosive_first_step_trial2",
+    "task": "Without reading any files first, create a new file tasks/big_first_step.py containing exactly 25 separate functions named function_1 through function_25. Each function must take two integer parameters and return their sum, with a one-line docstring above each function describing what it does. Write the ENTIRE file in a single write_file call as your very first action \u2014 do not call read_file at all before writing. After writing the file, run it to confirm it executes without error (a __main__ block calling a couple of the functions and printing the results is enough).",
+    "steps": 0,
+    "token_counts": [],
+    "first_step_tool": null,
+    "step1_tokens": null
+  }
+]
