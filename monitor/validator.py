@@ -1,6 +1,23 @@
 import re
 
 
+# Reasoned, not swept — this isn't a detection threshold with a signal to
+# sweep against, it's an input-validation floor with no live-trial data to
+# check it against. Checked by hand instead: the old value (10) rejects
+# real, clearly-actionable short task phrasings like "fix x.py" or
+# "run x.py" (8 characters each) with the misleading message "too short to
+# be actionable" — they're not; they're just terse and already name a real
+# file. Lowered to 6, chosen as the smallest floor that still blocks
+# degenerate junk that would otherwise slip past the file-reference regex
+# below purely by accident (e.g. "a.b" or "ab.c", 3-4 characters, which
+# technically match `[\w/\-]+\.\w+` despite not being a real task). 6 keeps
+# both properties: "fix x.py"/"run x.py" (8 chars) now correctly pass,
+# while "a.b"/"ab.c" (3-4 chars) still correctly get rejected here, before
+# ever reaching the file-reference check where they'd otherwise wrongly
+# pass as "valid" due to the accidental regex match.
+MIN_TASK_LENGTH = 6
+
+
 def validate_task(task: str) -> dict:
     """Check a task description for obvious problems before running the agent.
 
@@ -19,7 +36,7 @@ def validate_task(task: str) -> dict:
     if not task:
         return {"valid": False, "reason": "Task description is empty."}
 
-    if len(task) < 10:
+    if len(task) < MIN_TASK_LENGTH:
         return {"valid": False, "reason": "Task description is too short to be actionable."}
 
     # look for something that resembles a filename: word characters, optional
