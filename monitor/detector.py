@@ -279,37 +279,97 @@ def check_goal_drift(original_goal: str, current_step: dict, trajectory: list,
     return None
 
 
-def check_infinite_loop(trajectory: list, threshold: int = LOOP_REPETITION_THRESHOLD) -> dict | None:
-    """Check whether the same (tool, input, output) signature has repeated consecutively.
+def _step_signature(step: dict) -> tuple:
+    """The (tool, input, output) triple used to compare steps for repetition.
 
-    The signature includes the output, not just the tool and input. A step
-    that calls run_code on the same file repeatedly is only a real loop if it
-    keeps getting the same result each time — if the output changes between
+    Includes the output, not just the tool and input. A step that calls
+    run_code on the same file repeatedly is only a real loop if it keeps
+    getting the same result each time — if the output changes between
     calls, the agent is making progress, not looping.
+    """
+    return (step["tool_used"], str(step["input_summary"]), str(step["output_summary"]))
+
+
+def _count_trailing_cycle_repetitions(signatures: list, cycle_length: int) -> int:
+    """Count how many times the most recent `cycle_length`-step pattern has
+    repeated back-to-back, ending at the last signature in the list.
+
+    cycle_length=1 finds the same single step repeated (A, A, A, ...).
+    cycle_length=2 finds a 2-step pattern alternating (A, B, A, B, ...).
+    Larger values generalize the same idea to longer repeating units.
+    """
+    if len(signatures) < cycle_length:
+        return 0
+
+    unit = tuple(signatures[-cycle_length:])
+    count = 0
+    i = len(signatures)
+    while i >= cycle_length:
+        chunk = tuple(signatures[i - cycle_length:i])
+        if chunk != unit:
+            break
+        count += 1
+        i -= cycle_length
+    return count
+
+
+# How many consecutive repetitions to detect at once. 1 = the original
+# "same call three times in a row" behavior. Extended after a real live
+# trial (tests/measure_rollback_behavior.py, buggy_add_trial1/trial2) showed
+# the ORIGINAL cycle_length=1-only check completely miss a genuine wasted
+# trajectory: the agent alternated read_file -> run_code -> read_file ->
+# run_code (re-verifying an already-fixed file) for the entire 25-step
+# budget, burning ~11,000 tokens (~7x a clean run's cost) with ZERO
+# anomalies of any kind ever flagged — the exact same redundant-
+# verification pattern that motivated ROLLBACK_SEVERITY_THRESHOLD's original
+# fix, this time evading detection entirely because it alternates between
+# two DIFFERENT calls instead of repeating one identical call. This was a
+# known, explicitly-deferred gap ("lets put that aside for now") until this
+# real trial gave it a concrete, quantified cost.
+MAX_LOOP_CYCLE_LENGTH = 3
+
+
+def check_infinite_loop(trajectory: list, threshold: int = LOOP_REPETITION_THRESHOLD,
+                         max_cycle_length: int = MAX_LOOP_CYCLE_LENGTH) -> dict | None:
+    """Check whether a repeating cycle of steps — not just an identical single
+    step — has repeated back-to-back enough times to count as a loop.
+
+    Checks cycle lengths from 1 (the same single step repeated) up to
+    max_cycle_length (e.g. a 2-step alternating pattern, a 3-step cycle),
+    trying the shortest/most specific pattern first. A cycle only counts if
+    its OWN repetition count clears `threshold` — a 2-step alternating
+    pattern needs to alternate at least `threshold` full times, not just
+    appear `threshold` times total.
+
+    Also fixes a bug in the repetition count this returns: it used to always
+    report exactly `threshold` regardless of how many times the pattern had
+    actually repeated, which meant monitor.scorer.score_infinite_loop's
+    severity scaling above LOOP_SEVERITY_FLOOR (via LOOP_CAP_REPETITIONS) was
+    structurally unreachable in every real run — every real infinite_loop
+    anomaly ever recorded had repetition_count exactly 3. Now reports the
+    real, actual count of consecutive repetitions found.
 
     Args:
         trajectory: The full active trajectory so far.
-        threshold: How many consecutive identical signatures count as a loop.
+        threshold: How many consecutive repetitions of a cycle count as a loop.
+        max_cycle_length: The longest repeating-step-pattern length to check for.
 
     Returns:
         An anomaly dict if a loop is detected, otherwise None.
     """
-    if len(trajectory) < threshold:
-        return None
+    signatures = [_step_signature(step) for step in trajectory]
 
-    recent_steps = trajectory[-threshold:]
-    signatures = [
-        (step["tool_used"], str(step["input_summary"]), str(step["output_summary"]))
-        for step in recent_steps
-    ]
+    for cycle_length in range(1, max_cycle_length + 1):
+        repetitions = _count_trailing_cycle_repetitions(signatures, cycle_length)
+        if repetitions >= threshold:
+            return {
+                "type": "infinite_loop",
+                "step": trajectory[-1]["step_number"],
+                "repeated_signature": tuple(signatures[-cycle_length:]),
+                "cycle_length": cycle_length,
+                "repetition_count": repetitions,
+            }
 
-    if len(set(signatures)) == 1:
-        return {
-            "type": "infinite_loop",
-            "step": trajectory[-1]["step_number"],
-            "repeated_signature": signatures[0],
-            "repetition_count": threshold,
-        }
     return None
 
 

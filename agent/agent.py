@@ -31,15 +31,37 @@ GEMINI_MODEL = "gemini-2.5-flash"
 # tests/tune_severity_threshold.py: 20 labeled anomaly-combination scenarios
 # (including a real one taken from a live dashboard run) run through the
 # actual, unmodified monitor.scorer.calculate_severity(). 0.45 gives the best
-# F1 (0.929) with perfect recall (1.0) — it catches every scenario labeled
+# F1 with perfect recall (1.0) — it catches every scenario labeled
 # should_rollback, including an isolated bare-minimum infinite_loop (severity
 # 0.5) and a real success-loop trajectory (severity 0.5672). The prior
 # arbitrary value of 0.8 scored F1=0.471, missing 9 of 13 real cases,
-# including that same live success-loop run. The tradeoff at 0.45: 2 false
-# positives, both a single uncorroborated moderate goal_drift reading with no
-# other anomaly backing it up — judged more acceptable than silently missing
-# a genuine stuck loop.
+# including that same live success-loop run. F1 at 0.45 was 0.929 originally;
+# after fixing LOW_CONFIDENCE_PENALTY (see monitor/scorer.py) it improved to
+# 0.963 with the same 0.45 threshold still optimal — that fix removed one of
+# the two residual false positives (a low-confidence, uncorroborated
+# goal_drift reading). The one remaining false positive is a single
+# NORMAL-confidence moderate goal_drift reading with no other anomaly
+# backing it up — judged more acceptable than silently missing a genuine
+# stuck loop.
 ROLLBACK_SEVERITY_THRESHOLD = 0.45
+
+# Grounded via tests/analyze_step_budget.py against every real trial's step
+# count collected across this project (no live run needed — step counts are
+# already recorded in existing results files). This is a last-resort
+# circuit breaker, not the primary control — the anomaly detectors +
+# rollback system are meant to catch a genuinely stuck trajectory well
+# before a step-count cap matters. Widest real legitimate task difficulty
+# tested so far: 11 steps (the deliberately larger "write 25 test
+# functions" structural task); trivial bug-fix tasks take 2-3 steps. 25
+# gives 2.27x headroom over the hardest real task seen. The one saved
+# dashboard run that actually hit 25 steps predates the
+# ROLLBACK_SEVERITY_THRESHOLD fix (it was looping on an already-completed
+# task, not doing legitimate work) and is excluded as evidence — see
+# tests/analyze_step_budget.py for why. CAVEAT: no real trial has ever
+# exercised a genuinely complex, multi-file task in the 12-24 step range, so
+# this confirms real margin over everything actually tested but isn't a
+# swept/validated optimum the way TOKEN_MIN_RATIO or ROLLBACK_SEVERITY_
+# THRESHOLD are.
 MAX_TOTAL_STEPS = 25  # hard safety cap, independent of rollback retry limits
 
 

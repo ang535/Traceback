@@ -1,0 +1,98 @@
+[
+  {
+    "label": "buggy_add_trial1",
+    "task": "Read the file tasks/buggy_add.py, find the bug, fix it, and run it to confirm it works.",
+    "status": "success",
+    "steps": 25,
+    "rollback_history": [],
+    "anomalies_by_step": {},
+    "cost_summary": {
+      "total_tokens": 11163,
+      "useful_tokens": 11163,
+      "rollback_count": 0,
+      "tokens_wasted_on_rollbacks": 0,
+      "cost_multiplier": 1.0
+    }
+  },
+  {
+    "label": "buggy_multiply_trial2",
+    "task": "Read the file tasks/buggy_multiply.py, find the bug, fix it, and run it to confirm it works.",
+    "status": "success",
+    "steps": 25,
+    "rollback_history": [],
+    "anomalies_by_step": {},
+    "cost_summary": {
+      "total_tokens": 10849,
+      "useful_tokens": 10849,
+      "rollback_count": 0,
+      "tokens_wasted_on_rollbacks": 0,
+      "cost_multiplier": 1.0
+    }
+  },
+  {
+    "label": "buggy_add_trial3",
+    "task": "Read the file tasks/buggy_add.py, find the bug, fix it, and run it to confirm it works.",
+    "status": "success",
+    "steps": 26,
+    "rollback_history": [
+      {
+        "attempt": 1,
+        "rollback_point": 16,
+        "new_branch_id": 1,
+        "anomaly_types": [
+          "token_explosion"
+        ],
+        "severity": 0.6108
+      }
+    ],
+    "anomalies_by_step": {
+      "16": [
+        {
+          "type": "token_explosion",
+          "step": 16,
+          "token_count": 1248,
+          "rolling_average": 453.53333333333336,
+          "ratio": 2.7517271791856532,
+          "detection_method": "rolling_average"
+        }
+      ],
+      "17": [
+        {
+          "type": "token_explosion",
+          "step": 17,
+          "token_count": 2486,
+          "rolling_average": 503.1875,
+          "ratio": 4.940504285181965,
+          "detection_method": "rolling_average"
+        }
+      ],
+      "23": [
+        {
+          "type": "token_explosion",
+          "step": 23,
+          "token_count": 1425,
+          "rolling_average": 518.8636363636364,
+          "ratio": 2.7463863337713534,
+          "detection_method": "rolling_average"
+        }
+      ],
+      "26": [
+        {
+          "type": "token_explosion",
+          "step": 26,
+          "token_count": 1477,
+          "rolling_average": 551.36,
+          "ratio": 2.678830528148578,
+          "detection_method": "rolling_average"
+        }
+      ]
+    },
+    "cost_summary": {
+      "total_tokens": 17747,
+      "useful_tokens": 15261,
+      "rollback_count": 1,
+      "tokens_wasted_on_rollbacks": 2486,
+      "cost_multiplier": 1.16
+    }
+  }
+]
