@@ -1,21 +1,39 @@
 MAX_ROLLBACKS_PER_TASK = 3
 
-SEVERITY_FULL_RESTART_THRESHOLD = 0.85  # at or above this, even one anomaly warrants a full restart
+# Both conditions are required to trigger a full restart — see the "two-signal
+# gate" note on find_rollback_point below for why severity alone isn't enough.
+#
+# Empirically set via tests/fixtures/full_restart_scenarios.py + tests/
+# tune_full_restart_threshold.py: 19 labeled scenarios (reasoned judgment
+# calls, not measurements — full_restart has never fired in a real run; see
+# the caveat at the top of full_restart_scenarios.py), evaluated against the
+# real two-signal gate. Once MIN_ANOMALY_TYPES_FOR_FULL_RESTART removed the
+# single-anomaly-saturation ambiguity, every threshold from 0.8 to 0.85
+# achieved perfect F1=1.0 — the real gap in the labeled data sits between the
+# highest-severity False case (0.7988, three types but none individually
+# severe) and the lowest-severity True case (0.8957, three types with real
+# per-type severity). 0.85 sits inside that gap with margin on both sides, so
+# it's kept as-is rather than moved to the boundary value of 0.8.
+SEVERITY_FULL_RESTART_THRESHOLD = 0.85  # combined severity must be at or above this...
+MIN_ANOMALY_TYPES_FOR_FULL_RESTART = 2  # ...AND this many DISTINCT anomaly types must be firing together
 
 
 def decide_rollback_strategy(anomaly_type: str, severity: float) -> str:
-    """Decide which rollback strategy fits a given anomaly type and severity.
+    """Decide which per-anomaly rollback strategy fits a given anomaly type and severity.
+
+    This only ever returns a LOCAL strategy for one anomaly at a time — how
+    far back to step for this specific failure. The decision to discard the
+    entire trajectory (full_restart) is not a property of any single anomaly;
+    it's made once, trajectory-wide, in find_rollback_point (see the note
+    there for why that had to be pulled out of this function).
 
     Args:
-        anomaly_type: The type of the (most severe) anomaly that triggered rollback.
+        anomaly_type: The type of anomaly to decide a strategy for.
         severity: The combined severity score (0.0-1.0) for this step.
 
     Returns:
-        One of "rollback_one_step", "rollback_to_last_clean", or "full_restart".
+        One of "rollback_one_step" or "rollback_to_last_clean".
     """
-    if severity >= SEVERITY_FULL_RESTART_THRESHOLD:
-        return "full_restart"
-
     if anomaly_type == "infinite_loop":
         # loops are cascading by nature — going back one step just re-enters the loop
         return "rollback_to_last_clean"
@@ -31,29 +49,60 @@ def decide_rollback_strategy(anomaly_type: str, severity: float) -> str:
     return "rollback_one_step"
 
 
-def find_rollback_point(anomalies: list, trajectory: list) -> int:
+def find_rollback_point(anomalies: list, trajectory: list, severity: float) -> int:
     """Find the step number to roll back to, given one or more simultaneous anomalies.
 
     When multiple anomalies fired at once, this finds the EARLIEST "last clean
     step" implied across all of them — i.e. the most conservative rollback
     point, since rolling back too little risks leaving a problem uncorrected.
 
+    Bug this signature fixes: severity used to be read per-anomaly via
+    anomaly.get("severity", 0.5) — a key detector.py's anomaly dicts never
+    actually contain, so it silently fell back to a hardcoded 0.5 every time.
+    That made SEVERITY_FULL_RESTART_THRESHOLD (0.85) and the goal_drift
+    severity>0.6 branch in decide_rollback_strategy both permanently
+    unreachable, since 0.5 is never >= 0.85 or > 0.6. Now the real combined
+    severity is passed in and used directly.
+
+    Two-signal gate for full_restart: full_restart discards the ENTIRE
+    trajectory and treats every token spent so far as wasted — a much bigger
+    cost than rollback_to_last_clean, which already reaches back exactly as
+    far as each anomaly's own type-specific logic says is necessary. Once the
+    severity-wiring bug above was fixed, tuning SEVERITY_FULL_RESTART_THRESHOLD
+    against labeled scenarios (tests/fixtures/full_restart_scenarios.py)
+    surfaced a real structural problem: monitor.scorer.calculate_severity()
+    can independently saturate a SINGLE anomaly (one maxed-out loop, one
+    runaway token ratio, one total goal-drift departure) to severity=1.0 —
+    identical to what several anomalies compounding together also produce.
+    A single severity threshold cannot tell "one isolated failure, however
+    extreme" apart from "multiple corroborating failures, jointly severe" —
+    they can be numerically indistinguishable. Since rollback_to_last_clean
+    already handles a single severe anomaly correctly on its own, full_restart
+    is now gated on BOTH severity AND the number of distinct anomaly types
+    firing together (MIN_ANOMALY_TYPES_FOR_FULL_RESTART), so an isolated
+    single-anomaly spike no longer triggers it no matter how severe.
+
     Args:
         anomalies: The list of anomaly dicts that fired on the current step.
         trajectory: The active trajectory so far, including the current step.
+        severity: The combined severity score (0.0-1.0) for this step, as
+                  computed by monitor.scorer.calculate_severity().
 
     Returns:
-        The step_number to roll back to.
+        The step_number to roll back to, or 0 for a full restart.
     """
+    distinct_anomaly_types = {a["type"] for a in anomalies}
+    if (severity >= SEVERITY_FULL_RESTART_THRESHOLD
+            and len(distinct_anomaly_types) >= MIN_ANOMALY_TYPES_FOR_FULL_RESTART):
+        return 0  # 0 means restart from nothing
+
     current_step_number = trajectory[-1]["step_number"]
     candidate_points = []
 
     for anomaly in anomalies:
-        strategy = decide_rollback_strategy(anomaly["type"], anomaly.get("severity", 0.5))
+        strategy = decide_rollback_strategy(anomaly["type"], severity)
 
-        if strategy == "full_restart":
-            candidate_points.append(0)  # 0 means restart from nothing
-        elif strategy == "rollback_to_last_clean":
+        if strategy == "rollback_to_last_clean":
             # for a loop, "last clean" is the step before the repetition began
             repetition_count = anomaly.get("repetition_count", 1)
             candidate_points.append(max(0, current_step_number - repetition_count))
@@ -143,7 +192,7 @@ class RollbackManager:
                 ),
             }
 
-        rollback_point = find_rollback_point(anomalies, trajectory)
+        rollback_point = find_rollback_point(anomalies, trajectory, severity)
         correction = build_combined_correction(anomalies, original_goal)
         new_branch_id = logger.start_new_branch(rollback_point)
 

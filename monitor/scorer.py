@@ -1,4 +1,4 @@
-from monitor.detector import DRIFT_THRESHOLD  # noqa: F401 — re-exported; see note below
+from monitor.detector import DRIFT_THRESHOLD, LOOP_REPETITION_THRESHOLD  # noqa: F401 — re-exported; see notes below
 
 LOW_CONFIDENCE_PENALTY = 0.5  # how much a "low confidence" flag gets discounted
 DIMINISHING_RETURNS_RATE = 0.3  # each additional anomaly closes 30% of the remaining gap to 1.0
@@ -15,7 +15,13 @@ DIMINISHING_RETURNS_RATE = 0.3  # each additional anomaly closes 30% of the rema
 # correctly-detected drift was silently scoring zero severity. Now imported
 # directly from monitor.detector so there's one source of truth.
 
-LOOP_MIN_THRESHOLD = 3   # repetitions needed to trigger the anomaly at all
+# LOOP_MIN_THRESHOLD used to be redefined here as its own literal 3,
+# independently of monitor.detector's real (empirically validated)
+# LOOP_REPETITION_THRESHOLD. Both happened to equal 3, so nothing was
+# actively broken — but it was the exact same bug shape as the DRIFT_THRESHOLD
+# issue above: two disconnected copies of the same real-world number, with
+# nothing keeping them in sync if one is ever changed. Now imported directly.
+LOOP_MIN_THRESHOLD = LOOP_REPETITION_THRESHOLD  # repetitions needed to trigger the anomaly at all
 LOOP_SEVERITY_FLOOR = 0.5  # severity at exactly the minimum threshold
 LOOP_CAP_REPETITIONS = 6   # repetitions at which severity saturates to 1.0
 

@@ -27,7 +27,19 @@ PROVIDER = "groq"
 GROQ_MODEL = "openai/gpt-oss-20b"
 GEMINI_MODEL = "gemini-2.5-flash"
 
-ROLLBACK_SEVERITY_THRESHOLD = 0.8
+# Empirically set at 0.45 via tests/fixtures/severity_scenarios.py +
+# tests/tune_severity_threshold.py: 20 labeled anomaly-combination scenarios
+# (including a real one taken from a live dashboard run) run through the
+# actual, unmodified monitor.scorer.calculate_severity(). 0.45 gives the best
+# F1 (0.929) with perfect recall (1.0) — it catches every scenario labeled
+# should_rollback, including an isolated bare-minimum infinite_loop (severity
+# 0.5) and a real success-loop trajectory (severity 0.5672). The prior
+# arbitrary value of 0.8 scored F1=0.471, missing 9 of 13 real cases,
+# including that same live success-loop run. The tradeoff at 0.45: 2 false
+# positives, both a single uncorroborated moderate goal_drift reading with no
+# other anomaly backing it up — judged more acceptable than silently missing
+# a genuine stuck loop.
+ROLLBACK_SEVERITY_THRESHOLD = 0.45
 MAX_TOTAL_STEPS = 25  # hard safety cap, independent of rollback retry limits
 
 
