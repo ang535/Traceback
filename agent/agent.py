@@ -129,6 +129,31 @@ def _extract_step_info(message) -> dict | None:
     return None
 
 
+def _is_success_loop(anomaly: dict) -> bool:
+    """True if an infinite_loop anomaly's repeating cycle includes a
+    successful run_code call — meaning the agent already finished the task
+    correctly and is just redundantly re-verifying, not stuck on a real
+    failure.
+
+    Why this matters: tests/measure_rollback_behavior.py showed this exact
+    situation happening live — the loop detector (correctly) fires, but the
+    normal rollback response ("roll back and try a different approach") is
+    actively counterproductive here, since there's nothing wrong to fix.
+    Discarding a correct, already-passing solution and asking the agent to
+    try something ELSE just wastes tokens and, per that real trial data,
+    often doesn't even resolve — the agent tends to fall into the same
+    re-verification habit again regardless of what it tries next. Distinct
+    handling for this case (see the check_infinite_loop-adjacent block in
+    run_agent()) ends the run as a genuine success right there instead.
+    """
+    if anomaly.get("type") != "infinite_loop":
+        return False
+    for tool, _, output in anomaly.get("repeated_signature", ()):
+        if tool == "run_code" and not str(output).lower().startswith("error"):
+            return True
+    return False
+
+
 def run_agent(task: str) -> dict:
     """Run the coding agent on a task, with full trajectory monitoring.
 
@@ -229,6 +254,38 @@ def run_agent(task: str) -> dict:
 
             if anomalies:
                 anomalies_by_step[entry["step_number"]] = anomalies
+
+                # A loop whose repeating cycle includes a passing run_code
+                # call means the task is already done — the agent is just
+                # redundantly re-verifying, not stuck. Rolling back and
+                # asking it to "try something different" would discard
+                # genuinely correct work for no reason (see _is_success_loop's
+                # docstring — this was found live, not theorized). Trim the
+                # trajectory back to just after the FIRST successful
+                # confirmation and end the run as a success right there,
+                # instead of continuing to loop or triggering a real rollback.
+                success_loop = next((a for a in anomalies if _is_success_loop(a)), None)
+                if success_loop:
+                    cycle_length = success_loop.get("cycle_length", 1)
+                    repetition_count = success_loop.get("repetition_count", 1)
+                    loop_span = cycle_length * repetition_count
+                    trim_to = max(0, entry["step_number"] - loop_span + cycle_length)
+
+                    discarded_before = [s for s in logger.get_full_log() if not s["is_active"]]
+                    logger.start_new_branch(trim_to)
+                    discarded_after = [s for s in logger.get_full_log() if not s["is_active"]]
+                    newly_discarded = discarded_after[len(discarded_before):]
+                    if newly_discarded:
+                        cost_tracker.log_rollback(newly_discarded)
+
+                    final_ai_message = (
+                        final_ai_message
+                        or "Task completed successfully. (Automatically stopped after "
+                           "detecting redundant re-verification of an already-passing result.)"
+                    )
+                    produced_any_step = False  # signals the outer while loop to stop, not retry
+                    break
+
                 severity = calculate_severity(anomalies)
                 if severity >= ROLLBACK_SEVERITY_THRESHOLD:
                     discarded_before = [s for s in logger.get_full_log() if not s["is_active"]]
