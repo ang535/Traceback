@@ -113,22 +113,18 @@ if __name__ == "__main__":
         valid = [t for t in first_step_trials if t.get("first_step_tool") == "write_file"]
         if valid:
             adversarial_step1 = [t["step1_tokens"] for t in valid]
-            print(f"\n  ADVERSARIAL real data (tests/measure_first_step_baseline.py — forced "
-                  f"the agent's first action to be a large write, not a read): "
-                  f"{adversarial_step1}")
+            print(f"\n  Adversarial real data (tests/measure_first_step_baseline.py — forced "
+                  f"first action was a large write, not a read): {adversarial_step1}")
             print(f"  Largest real adversarial step 1: {max(adversarial_step1)} "
                   f"({round(100 * max(adversarial_step1) / 4000, 1)}% of the ceiling, "
-                  f"real margin {round(4000 / max(adversarial_step1), 2)}x)")
-            print(f"  4000 stayed safely above the most adversarial real case measured so far — "
-                  f"no data suggests changing it, but the real margin is meaningfully smaller "
-                  f"than the {round(4000 / max(step1_counts), 1)}x the ordinary-task data alone "
-                  f"would imply.")
+                  f"margin {round(4000 / max(adversarial_step1), 2)}x)")
+            print(f"  4000 stays above the most adversarial real case measured; margin is "
+                  f"{round(4000 / max(step1_counts), 1)}x against ordinary-task data alone.")
         else:
             print("\n  first_step_baseline_results.json exists but has no valid trials "
-                  "(model read a file first despite instructions in every trial).")
+                  "(model read a file first in every trial).")
     except FileNotFoundError:
-        print("\n  CAVEAT: no real trial has ever had an explosive first step — every ordinary "
-              "task's step 1 is just reading the target file, naturally small regardless of "
-              "task type. This confirms 4000 is safe against everything observed so far, but "
-              "there is no real data point demonstrating what a genuinely explosive step 1 "
-              "looks like. Run tests/measure_first_step_baseline.py to get one.")
+        print("\n  CAVEAT: no real trial has had an explosive first step — every ordinary "
+              "task's step 1 is a small read. Confirms 4000 is safe against everything "
+              "observed so far but there's no data point for a genuinely explosive step 1. "
+              "Run tests/measure_first_step_baseline.py to get one.")

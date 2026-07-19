@@ -10,20 +10,15 @@ from monitor.detector import DRIFT_THRESHOLD, LOOP_REPETITION_THRESHOLD  # noqa:
 # calculate_severity(), so this asks a different question: how much does
 # each one actually matter, given everything else at its real value?
 #
-# LOW_CONFIDENCE_PENALTY was the one real finding. At the old value (0.5), a
-# single low-confidence goal_drift signal (similarity=0.0, confidence="low")
-# computes severity exactly 0.5 — just over ROLLBACK_SEVERITY_THRESHOLD
-# (0.45), incorrectly triggering a rollback despite the whole point of the
-# penalty being to NOT overreact to one noisy signal alone. Sweeping
-# candidates [0.0, 0.25, 0.5, 0.75, 1.0] showed F1 improves from 0.929 to
-# 0.963 at 0.0 or 0.25, and stays there — both remove that false positive.
-# 0.25 was chosen over the more extreme 0.0: 0.0 fully zeroes out any
-# low-confidence signal even when corroborating with others, discarding real
-# information; 0.25 fixes the actual false positive (a low-confidence signal
-# ALONE) while still letting a low-confidence signal contribute a small
-# amount toward corroborating other anomalies, matching the project's stated
-# philosophy that "corroborating signals are stronger evidence than any one
-# of them alone."
+# At the old value (0.5), a single low-confidence goal_drift signal
+# (similarity=0.0, confidence="low") computed severity exactly 0.5 — just
+# over ROLLBACK_SEVERITY_THRESHOLD (0.45), incorrectly triggering a rollback
+# from one noisy signal alone. Sweeping candidates [0.0, 0.25, 0.5, 0.75, 1.0]
+# showed F1 improves from 0.929 to 0.963 at 0.0 or 0.25. 0.25 was chosen over
+# 0.0 because 0.0 fully zeroes out a low-confidence signal even when it's
+# corroborating with others, discarding real information; 0.25 fixes the
+# false positive while still letting a low-confidence signal contribute a
+# small amount toward corroborating other anomalies.
 LOW_CONFIDENCE_PENALTY = 0.25  # how much a "low confidence" flag gets discounted
 
 # DIMINISHING_RETURNS_RATE: swept [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0] — F1

@@ -47,12 +47,9 @@ class CostTracker:
 
         Deliberately separate from log_rollback: this isn't a retry after a
         real problem, it's the system recognizing the task already succeeded
-        and trimming away only the REDUNDANT extra confirmations. Before this
-        distinction existed, both cases fed the same rollback_events list, so
-        cost_summary()'s "rollback_count" would report 1 for a run that never
-        actually rolled back or retried anything — misleading for anything
-        reading the dashboard/cost summary trying to understand whether a
-        real problem occurred.
+        and trimming away only the redundant extra confirmations. Keeping
+        this separate means cost_summary()'s "rollback_count" reflects only
+        genuine retries, not success-loop trims.
 
         Args:
             discarded_steps: The list of step dicts being marked inactive by the trim.

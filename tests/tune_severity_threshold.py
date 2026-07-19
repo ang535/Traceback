@@ -83,7 +83,8 @@ if __name__ == "__main__":
 
     print(f"\nBest threshold: {best['threshold']}  "
           f"(F1={best['f1']}, Precision={best['precision']}, Recall={best['recall']})")
-    print(f"Current value in agent/agent.py: ROLLBACK_SEVERITY_THRESHOLD = 0.8")
+    from agent.agent import ROLLBACK_SEVERITY_THRESHOLD as current_value
+    print(f"Current value in agent/agent.py: ROLLBACK_SEVERITY_THRESHOLD = {current_value}")
 
     if best["wrong"]:
         print(f"\nMisclassified scenarios at threshold={best['threshold']}:")

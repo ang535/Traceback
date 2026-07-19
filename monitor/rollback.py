@@ -3,17 +3,14 @@ MAX_ROLLBACKS_PER_TASK = 3
 # Both conditions are required to trigger a full restart — see the "two-signal
 # gate" note on find_rollback_point below for why severity alone isn't enough.
 #
-# Empirically set via tests/fixtures/full_restart_scenarios.py + tests/
+# Set via tests/fixtures/full_restart_scenarios.py + tests/
 # tune_full_restart_threshold.py: 19 labeled scenarios (reasoned judgment
-# calls, not measurements — full_restart has never fired in a real run; see
-# the caveat at the top of full_restart_scenarios.py), evaluated against the
-# real two-signal gate. Once MIN_ANOMALY_TYPES_FOR_FULL_RESTART removed the
-# single-anomaly-saturation ambiguity, every threshold from 0.8 to 0.85
-# achieved perfect F1=1.0 — the real gap in the labeled data sits between the
-# highest-severity False case (0.7988, three types but none individually
-# severe) and the lowest-severity True case (0.8957, three types with real
-# per-type severity). 0.85 sits inside that gap with margin on both sides, so
-# it's kept as-is rather than moved to the boundary value of 0.8.
+# calls, not measurements — full_restart has never fired in a real run),
+# evaluated against the two-signal gate below. With
+# MIN_ANOMALY_TYPES_FOR_FULL_RESTART in place, every threshold from 0.8 to
+# 0.85 achieves F1=1.0. The gap in the labeled data sits between the
+# highest-severity False case (0.7988) and the lowest-severity True case
+# (0.8957). 0.85 sits inside that gap with margin on both sides.
 SEVERITY_FULL_RESTART_THRESHOLD = 0.85  # combined severity must be at or above this...
 MIN_ANOMALY_TYPES_FOR_FULL_RESTART = 2  # ...AND this many DISTINCT anomaly types must be firing together
 
@@ -56,31 +53,24 @@ def find_rollback_point(anomalies: list, trajectory: list, severity: float) -> i
     step" implied across all of them — i.e. the most conservative rollback
     point, since rolling back too little risks leaving a problem uncorrected.
 
-    Bug this signature fixes: severity used to be read per-anomaly via
-    anomaly.get("severity", 0.5) — a key detector.py's anomaly dicts never
-    actually contain, so it silently fell back to a hardcoded 0.5 every time.
-    That made SEVERITY_FULL_RESTART_THRESHOLD (0.85) and the goal_drift
-    severity>0.6 branch in decide_rollback_strategy both permanently
-    unreachable, since 0.5 is never >= 0.85 or > 0.6. Now the real combined
-    severity is passed in and used directly.
+    severity is the real combined severity computed by
+    monitor.scorer.calculate_severity() (not a per-anomaly value — anomaly
+    dicts from detector.py don't carry their own severity).
 
     Two-signal gate for full_restart: full_restart discards the ENTIRE
-    trajectory and treats every token spent so far as wasted — a much bigger
-    cost than rollback_to_last_clean, which already reaches back exactly as
-    far as each anomaly's own type-specific logic says is necessary. Once the
-    severity-wiring bug above was fixed, tuning SEVERITY_FULL_RESTART_THRESHOLD
-    against labeled scenarios (tests/fixtures/full_restart_scenarios.py)
-    surfaced a real structural problem: monitor.scorer.calculate_severity()
-    can independently saturate a SINGLE anomaly (one maxed-out loop, one
-    runaway token ratio, one total goal-drift departure) to severity=1.0 —
-    identical to what several anomalies compounding together also produce.
-    A single severity threshold cannot tell "one isolated failure, however
-    extreme" apart from "multiple corroborating failures, jointly severe" —
-    they can be numerically indistinguishable. Since rollback_to_last_clean
-    already handles a single severe anomaly correctly on its own, full_restart
-    is now gated on BOTH severity AND the number of distinct anomaly types
-    firing together (MIN_ANOMALY_TYPES_FOR_FULL_RESTART), so an isolated
-    single-anomaly spike no longer triggers it no matter how severe.
+    trajectory, a much bigger cost than rollback_to_last_clean, which already
+    reaches back exactly as far as each anomaly's own type-specific logic
+    says is necessary. monitor.scorer.calculate_severity() can independently
+    saturate a SINGLE anomaly (one maxed-out loop, one runaway token ratio,
+    one total goal-drift departure) to severity=1.0 — identical to what
+    several anomalies compounding together also produce. A severity
+    threshold alone can't distinguish "one isolated failure, however
+    extreme" from "multiple corroborating failures, jointly severe." Since
+    rollback_to_last_clean already handles a single severe anomaly
+    correctly, full_restart is gated on BOTH severity AND the number of
+    distinct anomaly types firing together (MIN_ANOMALY_TYPES_FOR_FULL_RESTART),
+    so an isolated single-anomaly spike doesn't trigger it regardless of
+    severity.
 
     Args:
         anomalies: The list of anomaly dicts that fired on the current step.
@@ -104,19 +94,14 @@ def find_rollback_point(anomalies: list, trajectory: list, severity: float) -> i
 
         if strategy == "rollback_to_last_clean":
             # For a loop, "last clean" is the step before the repeating
-            # pattern began. That's repetition_count steps back ONLY when
-            # cycle_length is 1 (the pattern is a single step repeating).
-            # For a longer cycle (e.g. cycle_length=2, an alternating
-            # read/run pattern), the looped region actually spans
-            # cycle_length * repetition_count steps — using repetition_count
-            # alone under-corrects by a factor of cycle_length, landing the
-            # rollback INSIDE the loop instead of before it. Found live via
-            # tests/measure_rollback_behavior.py: a cycle_length=2 loop
-            # (repetition_count=3, a real 6-step loop) was rolling back only
-            # 3 steps to a point still mid-pattern, so the agent resumed
-            # inside the loop and immediately fell back into it — 3 times,
-            # identically, exhausting MAX_ROLLBACKS_PER_TASK on a task that
-            # should have been trivially recoverable.
+            # pattern began — that's repetition_count steps back only when
+            # cycle_length is 1 (a single step repeating). For a longer
+            # cycle (e.g. cycle_length=2, an alternating read/run pattern),
+            # the looped region spans cycle_length * repetition_count steps;
+            # using repetition_count alone under-corrects by a factor of
+            # cycle_length, landing the rollback inside the loop instead of
+            # before it (see tests/measure_rollback_behavior.py,
+            # docs/rollback_point_cycle_length_fix.md).
             repetition_count = anomaly.get("repetition_count", 1)
             cycle_length = anomaly.get("cycle_length", 1)
             loop_span = repetition_count * cycle_length

@@ -28,7 +28,7 @@ Run with:
 """
 
 from monitor.scorer import calculate_severity
-from monitor.rollback import MIN_ANOMALY_TYPES_FOR_FULL_RESTART
+from monitor.rollback import MIN_ANOMALY_TYPES_FOR_FULL_RESTART, SEVERITY_FULL_RESTART_THRESHOLD
 from tests.fixtures.full_restart_scenarios import FULL_RESTART_SCENARIOS
 
 CANDIDATES = [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     print(f"\nBest threshold: {best['threshold']}  "
           f"(F1={best['f1']}, Precision={best['precision']}, Recall={best['recall']})")
-    print(f"Current value in monitor/rollback.py: SEVERITY_FULL_RESTART_THRESHOLD = 0.85")
+    print(f"Current value in monitor/rollback.py: SEVERITY_FULL_RESTART_THRESHOLD = {SEVERITY_FULL_RESTART_THRESHOLD}")
 
     if best["wrong"]:
         print(f"\nMisclassified scenarios at threshold={best['threshold']}:")

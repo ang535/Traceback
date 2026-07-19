@@ -69,12 +69,19 @@ def render_run_detail(record: dict) -> None:
 
     total_anomalies = sum(len(v) for v in anomalies_by_step.values())
 
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("Steps", len(trajectory))
     cols[1].metric("Total tokens", cost_summary.get("total_tokens", 0))
     cols[2].metric("Wasted on rollbacks", cost_summary.get("tokens_wasted_on_rollbacks", 0))
     cols[3].metric("Anomalies flagged", total_anomalies)
     cols[4].metric("Rollbacks", len(rollback_history))
+    # trim_count/tokens_wasted_on_trims added when log_trim() was split out
+    # from log_rollback() (see docs/step_and_rollback_budget_tuning.md,
+    # Round 4) — a success-loop early stop is NOT a rollback, but it still
+    # discards steps and is worth seeing on the dashboard rather than
+    # disappearing silently now that it's correctly excluded from the
+    # Rollbacks count above.
+    cols[5].metric("Trims (success-loop)", cost_summary.get("trim_count", 0))
 
     if not trajectory:
         st.info("No steps were logged for this run.")
@@ -96,7 +103,30 @@ def render_run_detail(record: dict) -> None:
     st.dataframe(table_rows, width="stretch", hide_index=True)
 
     st.markdown("#### Tokens per step")
-    st.bar_chart({s["step_number"]: s.get("token_count", 0) for s in trajectory})
+    # st.bar_chart stretches bars to fill the full chart width regardless of
+    # how few steps there are, so a short run looks like a couple of thick
+    # blocks. A single fixed mark_bar size overcorrects the other way (too
+    # thin) once a run only has 2-4 steps. Scale bar width with step count
+    # instead: wide for short runs, capped down as steps increase, with a
+    # floor so a long (~25-step) run doesn't get slivers either.
+    import altair as alt
+    import pandas as pd
+
+    bar_size = max(14, min(45, 220 // max(1, len(trajectory))))
+
+    chart_data = pd.DataFrame({
+        "Step": [s["step_number"] for s in trajectory],
+        "Tokens": [s.get("token_count", 0) for s in trajectory],
+    })
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar(size=bar_size)
+        .encode(
+            x=alt.X("Step:O", title="Step"),
+            y=alt.Y("Tokens:Q", title="Tokens"),
+        )
+    )
+    st.altair_chart(chart, width="stretch")
 
     if total_anomalies:
         st.markdown("#### Anomaly detail")

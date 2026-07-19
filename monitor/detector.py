@@ -7,43 +7,22 @@ import numpy as np
 # (e.g. agent.agent, or scripts that only exercise other detectors) work
 # without that heavy dependency being installed.
 
-# Validated via tests/tune_token_detection_gating.py against the same real
-# Groq trial data TOKEN_MIN_RATIO was measured from (tests/fixtures/
-# token_baseline_results.json) — no new live runs needed. The old value (3)
-# meant the rolling-average check never activated until step 4, leaving a
-# real detection gap: verbose_buggy_add_trial4's genuine explosion (ratio
-# 3.92 at step 2, relative to just one prior data point) was invisible to
-# the rolling check for its entire 10-step trajectory, since by the time the
-# window opened at step 4 the early spike had already been diluted into the
-# rolling average. It was only ever caught at step 8, when an individual
-# step happened to cross ABSOLUTE_TOKEN_CEILING outright — 6 steps and
-# thousands of wasted tokens later than the ratio-based signal was already
-# real. Sweeping min_steps=[1,2,3,4,5] against all 4 clean and 3 verbose
-# real trials: zero false positives on any clean trial at ANY candidate
-# value, and detection gets strictly earlier as min_steps drops — 1 (the
-# lowest value that avoids dividing by zero on an empty trajectory) catches
-# every real spike at the earliest possible step (step 2) with no cost.
-# ABSOLUTE_TOKEN_CEILING's role narrows cleanly as a result: with
-# min_steps=1, the rolling check covers step 2 onward, leaving ONLY step 1
-# (which has no prior history at all) needing the absolute-ceiling backstop.
+# Validated via tests/tune_token_detection_gating.py against real trial data
+# (tests/fixtures/token_baseline_results.json). Swept min_steps=[1,2,3,4,5]:
+# zero false positives on any clean trial at any candidate value, and
+# detection gets strictly earlier as min_steps drops. 1 is the lowest value
+# that avoids dividing by zero on an empty trajectory, and it catches every
+# real spike at the earliest possible step (step 2). With min_steps=1, the
+# rolling check covers step 2 onward, leaving only step 1 (no prior history)
+# needing the absolute-ceiling backstop below.
 MIN_STEPS_FOR_TOKEN_CHECK = 1
 
-# Measured, not just reasoned: tests/measure_first_step_baseline.py forced
-# a deliberately adversarial first step (write a 25-function file as the
-# very first action, no reading allowed first — the opposite of every real
-# task's step 1 in tests/fixtures/token_baseline_results.json, which were
-# all small read_file calls at 350-429 tokens). Run on real Groq trials
-# (openai/gpt-oss-20b): one valid trial produced a real step 1 of 2077
-# tokens — the largest real first-step token count observed in this
-# project, by a wide margin over the ordinary 350-429 range, and a genuine
-# stress test of what an unusually large-but-legitimate first action costs.
-# 4000 stayed safely above it (2077 is 52% of the ceiling — real margin is
-# ~1.9x against the most adversarial case measured, not the 9.3x the
-# ordinary-task data alone implied). No data suggests lowering it; nothing
-# in this project's task shape has come close to crossing it. Kept at 4000,
-# now genuinely tested rather than only reasoned. (A second trial run in the
-# same session produced 0 steps — the model didn't make a tool call at all
-# that run, unrelated to token counting; noted but not chased further here.)
+# Measured via tests/measure_first_step_baseline.py: a forced adversarial
+# first step (writing a 25-function file with no prior read) produced a real
+# step 1 of 2077 tokens on Groq (openai/gpt-oss-20b) — the largest real
+# first-step token count observed in this project. 4000 stays above it with
+# ~1.9x margin against the most adversarial case measured. No data suggests
+# lowering it.
 ABSOLUTE_TOKEN_CEILING = 4000
 LOOP_REPETITION_THRESHOLD = 3
 
@@ -313,19 +292,27 @@ def _count_trailing_cycle_repetitions(signatures: list, cycle_length: int) -> in
     return count
 
 
-# How many consecutive repetitions to detect at once. 1 = the original
-# "same call three times in a row" behavior. Extended after a real live
-# trial (tests/measure_rollback_behavior.py, buggy_add_trial1/trial2) showed
-# the ORIGINAL cycle_length=1-only check completely miss a genuine wasted
-# trajectory: the agent alternated read_file -> run_code -> read_file ->
-# run_code (re-verifying an already-fixed file) for the entire 25-step
-# budget, burning ~11,000 tokens (~7x a clean run's cost) with ZERO
-# anomalies of any kind ever flagged — the exact same redundant-
-# verification pattern that motivated ROLLBACK_SEVERITY_THRESHOLD's original
-# fix, this time evading detection entirely because it alternates between
-# two DIFFERENT calls instead of repeating one identical call. This was a
-# known, explicitly-deferred gap ("lets put that aside for now") until this
-# real trial gave it a concrete, quantified cost.
+# How many consecutive repetitions to detect at once. 1 = a single step
+# repeated; higher values catch longer alternating/cyclic patterns (e.g. a
+# 2-step read/run alternation). Detection previously only checked
+# cycle_length=1, missing multi-step alternating loops entirely (see
+# tests/measure_rollback_behavior.py results, docs/infinite_loop_cyclic_detection_fix.md).
+#
+# The upper bound (3) is validated via tests/tune_loop_cycle_length.py /
+# docs/loop_cycle_length_tuning.md:
+#   - Every real infinite_loop anomaly recorded in this project has
+#     cycle_length=2 (3/3 loop events). cycle_length=1 and cycle_length=3+
+#     have not occurred in real data.
+#   - agent/tools.py exposes exactly 3 distinct tools (read_file, write_file,
+#     run_code). A repeating cycle longer than 3 distinct steps is only
+#     possible if it reuses one of those 3 tools — with the same input AND
+#     output — inside its own unit; otherwise it's already a shorter cycle
+#     caught at cycle_length <= 3. 3 is the structural ceiling given this
+#     project's tool surface.
+#   - Raising this to 4 or 5 doesn't change any real trial's outcome so far.
+#     Checking longer cycle lengths costs nothing extra: shorter-cycle
+#     detection is unaffected, and false-positive risk is unaffected since
+#     an exact tool+input+output match is required regardless of length.
 MAX_LOOP_CYCLE_LENGTH = 3
 
 
@@ -341,13 +328,9 @@ def check_infinite_loop(trajectory: list, threshold: int = LOOP_REPETITION_THRES
     pattern needs to alternate at least `threshold` full times, not just
     appear `threshold` times total.
 
-    Also fixes a bug in the repetition count this returns: it used to always
-    report exactly `threshold` regardless of how many times the pattern had
-    actually repeated, which meant monitor.scorer.score_infinite_loop's
-    severity scaling above LOOP_SEVERITY_FLOOR (via LOOP_CAP_REPETITIONS) was
-    structurally unreachable in every real run — every real infinite_loop
-    anomaly ever recorded had repetition_count exactly 3. Now reports the
-    real, actual count of consecutive repetitions found.
+    The returned repetition_count is the real, actual count of consecutive
+    repetitions found — used by monitor.scorer.score_infinite_loop's severity
+    scaling (LOOP_SEVERITY_FLOOR / LOOP_CAP_REPETITIONS).
 
     Args:
         trajectory: The full active trajectory so far.

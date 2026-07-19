@@ -72,14 +72,8 @@ if __name__ == "__main__":
         traj_len = len(run.get("trajectory", []))
         rollback_count = len(run.get("rollback_history", []))
         print(f"  {path}: {traj_len} steps, {rollback_count} rollbacks, status={run.get('status')} "
-              f"— predates the ROLLBACK_SEVERITY_THRESHOLD fix (agent looped on an "
-              f"already-completed task instead of stopping); not a real measure of task difficulty.")
+              f"— predates the ROLLBACK_SEVERITY_THRESHOLD fix; not a real measure of task difficulty.")
 
-    print("\nCAVEAT: the widest real task difficulty tested so far tops out at 11 steps (the "
-          "deliberately larger structural task). No real trial has ever exercised a genuinely "
-          "complex, multi-file, multi-verification task in the 12-24 step range, so this analysis "
-          "can confirm 25 has real margin over everything actually observed, but can't rule out "
-          "that a legitimately harder real task might need to sit closer to the cap. Unlike "
-          "MIN_STEPS_FOR_TOKEN_CHECK or LOW_CONFIDENCE_PENALTY, there's no labeled scenario set "
-          "or sweep possible here — this is real data bounding a plausible range, not a validated "
-          "optimum.")
+    print("\nCAVEAT: widest real task difficulty tested so far is 11 steps (the structural task). "
+          "No real trial has exercised a task in the 12-24 step range, so this confirms margin "
+          "over everything observed but isn't a swept/validated optimum.")
