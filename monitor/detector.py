@@ -80,15 +80,25 @@ def describe_step(step: dict) -> str:
     tool = step.get("tool_used", "")
     input_summary = step.get("input_summary", "")
 
+    # use only the filepath if input_summary is a dict — file content is
+    # implementation detail, not intent, and would add noise to the embedding.
+    # Applies to every tool branch below: read_file and run_code previously
+    # interpolated the raw dict directly (e.g. "Reading the file
+    # {'filepath': 'tasks/buggy_add.py'} to inspect its contents"), the exact
+    # thing this function's docstring says it exists to avoid. Only
+    # write_file extracted the filepath correctly. Found live: a real run
+    # embedded that raw-dict string against a long, multi-clause task
+    # description and scored similarity 0.488 (below DRIFT_THRESHOLD=0.6),
+    # flagging a read_file call on the exact file named in the task as
+    # goal_drift on every single step.
+    filepath = input_summary.get("filepath", input_summary) if isinstance(input_summary, dict) else input_summary
+
     if tool == "read_file":
-        return f"Reading the file {input_summary} to inspect its contents"
+        return f"Reading the file {filepath} to inspect its contents"
     elif tool == "write_file":
-        # use only the filepath if input_summary is a dict — file content is
-        # implementation detail, not intent, and would add noise to the embedding
-        filepath = input_summary.get("filepath", input_summary) if isinstance(input_summary, dict) else input_summary
         return f"Writing changes to the file {filepath}"
     elif tool == "run_code":
-        return f"Running the file {input_summary} to test if it works"
+        return f"Running the file {filepath} to test if it works"
     else:
         return str(step.get("output_summary", ""))[:200]
 
@@ -243,6 +253,31 @@ def check_goal_drift(original_goal: str, current_step: dict, trajectory: list,
     Returns:
         An anomaly dict if drift is detected, otherwise None.
     """
+    # If the step's target file is one the task explicitly named, that's a
+    # stronger, deterministic signal of "on-task" than embedding similarity
+    # to the WHOLE task description can reliably provide — especially for
+    # longer, multi-part tasks, where an early step only addresses one
+    # clause of a much longer paragraph and structurally scores lower
+    # similarity even when it's exactly the right action. Found live: a
+    # real 5-sentence task ("read X, fix it, then write 25 test functions
+    # into Y, then run Y") scored only 0.529 similarity for reading X — the
+    # objectively correct first action — well below DRIFT_THRESHOLD=0.6,
+    # because the task's dominant semantic content is about Y and the 25
+    # test functions, not the read. DRIFT_THRESHOLD was only ever
+    # calibrated against short, single-clause tasks (see
+    # tests/fixtures/drift_scenarios_realistic.py); it had never been
+    # exercised against a task this long. Reusing the same deterministic
+    # file-match logic check_wrong_target_file already uses (in the
+    # opposite direction here) avoids this false positive without weakening
+    # drift detection for steps that don't touch a task-named file.
+    task_filenames = extract_filenames(original_goal)
+    if task_filenames:
+        step_target = get_step_target_filename(current_step)
+        if step_target is not None:
+            task_basenames = {f.split("/")[-1] for f in task_filenames}
+            if step_target.split("/")[-1] in task_basenames:
+                return None
+
     similarity = similarity_score if similarity_score is not None else compute_goal_similarity(original_goal, current_step)
 
     is_first_step = len(trajectory) <= 1

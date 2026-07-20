@@ -57,7 +57,9 @@ def render_run_detail(record: dict) -> None:
     status = record.get("status", "unknown")
     label, status_fn = STATUS_DISPLAY.get(status, (status, st.info))
 
-    st.subheader(record.get("task", "(no task recorded)"))
+    # The task text is already visible in the input box above (or, when
+    # browsing History, in that run's picker label) — repeating the full
+    # prompt again here was pure duplication.
     status_fn(f"**{label}** — {record.get('message', '')}")
     if record.get("warning"):
         st.warning(record["warning"])
@@ -69,25 +71,49 @@ def render_run_detail(record: dict) -> None:
 
     total_anomalies = sum(len(v) for v in anomalies_by_step.values())
 
+    st.markdown("#### Run summary")
     cols = st.columns(6)
-    cols[0].metric("Steps", len(trajectory))
-    cols[1].metric("Total tokens", cost_summary.get("total_tokens", 0))
-    cols[2].metric("Wasted on rollbacks", cost_summary.get("tokens_wasted_on_rollbacks", 0))
-    cols[3].metric("Anomalies flagged", total_anomalies)
-    cols[4].metric("Rollbacks", len(rollback_history))
+    cols[0].metric(
+        "Steps", len(trajectory),
+        help="How many actions the agent took in this run.",
+    )
+    cols[1].metric(
+        "Total tokens", cost_summary.get("total_tokens", 0),
+        help="Total tokens used across every step, including any steps that were later discarded.",
+    )
+    cols[2].metric(
+        "Wasted on rollbacks", cost_summary.get("tokens_wasted_on_rollbacks", 0),
+        help="Tokens spent on steps that were thrown away when the agent had to roll back and "
+             "retry after a real problem was detected. Part of the total above, not extra.",
+    )
+    cols[3].metric(
+        "Anomalies flagged", total_anomalies,
+        help="How many times the monitoring system flagged a potential problem, such as a "
+             "repeating loop, a sudden spike in response length, or the agent drifting off-task.",
+    )
+    cols[4].metric(
+        "Rollbacks", len(rollback_history),
+        help="How many times the agent's recent steps were discarded and retried after a "
+             "genuine problem was detected.",
+    )
     # trim_count/tokens_wasted_on_trims added when log_trim() was split out
     # from log_rollback() (see docs/step_and_rollback_budget_tuning.md,
     # Round 4) — a success-loop early stop is NOT a rollback, but it still
     # discards steps and is worth seeing on the dashboard rather than
     # disappearing silently now that it's correctly excluded from the
     # Rollbacks count above.
-    cols[5].metric("Trims (success-loop)", cost_summary.get("trim_count", 0))
+    cols[5].metric(
+        "Trims (success-loop)", cost_summary.get("trim_count", 0),
+        help="How many times redundant steps were automatically removed after the agent "
+             "finished the task correctly but kept re-checking its own work anyway.",
+    )
 
     if not trajectory:
         st.info("No steps were logged for this run.")
         return
 
-    st.markdown("#### Trajectory")
+    st.markdown("#### Execution Trajectory")
+    st.caption("Every action the agent took, in order, with what it did and what came back.")
 
     table_rows = []
     for step in trajectory:
@@ -153,43 +179,43 @@ def render_run_detail(record: dict) -> None:
 
 
 def main():
-    st.title("Traceback")
-    st.caption("Trajectory anomaly detection and recovery for agentic AI systems")
+    # A plain st.title() + st.caption() pair renders with a visible gap
+    # between them (Streamlit's default block spacing), which reads as two
+    # unrelated pieces of text rather than a heading + subheading. Wrapping
+    # both in one HTML block with the subheading's top margin removed pulls
+    # them together. opacity (rather than a hardcoded gray) is used for the
+    # subheading color so it still looks right under either theme.
+    st.markdown(
+        """
+        <div style="margin-bottom: 1.4rem;">
+            <h1 style="margin-bottom: 0.15rem;">Traceback</h1>
+            <p style="margin-top: 0; opacity: 0.6; font-size: 1rem;">
+                Trajectory anomaly detection and recovery for agentic AI systems
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if "current_run_id" not in st.session_state:
         st.session_state.current_run_id = None
     if "current_run_record" not in st.session_state:
         st.session_state.current_run_record = None
 
-    with st.sidebar:
-        st.header("New run")
-        try:
-            from agent.agent import PROVIDER, GROQ_MODEL, GEMINI_MODEL
+    try:
+        from agent.agent import PROVIDER, GROQ_MODEL, GEMINI_MODEL
 
-            active_model = GROQ_MODEL if PROVIDER == "groq" else GEMINI_MODEL
-            st.caption(f"Provider: `{PROVIDER}` · Model: `{active_model}`")
-        except Exception:
-            pass  # provider info is a nice-to-have, not worth failing the page over
+        active_model = GROQ_MODEL if PROVIDER == "groq" else GEMINI_MODEL
+        st.caption(f"Provider: `{PROVIDER}` · Model: `{active_model}`")
+    except Exception:
+        pass  # provider info is a nice-to-have, not worth failing the page over
 
-        task = st.text_area(
-            "Task",
-            placeholder="Read the file tasks/buggy_add.py, find the bug, fix it, and run it to confirm it works.",
-            height=100,
-        )
-        run_clicked = st.button("Run agent", type="primary", disabled=not task.strip())
-
-        st.divider()
-        st.header("History")
-
-        runs = list_runs()
-        if not runs:
-            st.caption("No saved runs yet — run something above.")
-        else:
-            options = {format_run_label(r): r["run_id"] for r in runs}
-            picked_label = st.selectbox("Past runs", list(options.keys()))
-            if st.button("Load selected run"):
-                st.session_state.current_run_id = options[picked_label]
-                st.session_state.current_run_record = load_run(options[picked_label])
+    task = st.text_area(
+        "Task",
+        placeholder="Read the file tasks/buggy_add.py, find the bug, fix it, and run it to confirm it works.",
+        height=140,
+    )
+    run_clicked = st.button("Run agent", type="primary", disabled=not task.strip())
 
     if run_clicked:
         from agent.agent import run_agent
@@ -203,10 +229,37 @@ def main():
             except Exception as e:
                 st.error(f"Run failed: {e}")
 
-    if st.session_state.current_run_record:
-        render_run_detail(st.session_state.current_run_record)
-    else:
-        st.info("Launch a run from the sidebar, or load one from history, to see details here.")
+    st.divider()
+
+    dashboard_tab, history_tab = st.tabs(["Dashboard", "History"])
+
+    with dashboard_tab:
+        if st.session_state.current_run_record:
+            render_run_detail(st.session_state.current_run_record)
+        else:
+            st.info("Launch a run above, or load one from the History tab, to see details here.")
+
+    with history_tab:
+        runs = list_runs()
+        if not runs:
+            st.caption("No saved runs yet — run something above.")
+        else:
+            options = {format_run_label(r): r["run_id"] for r in runs}
+            picked_label = st.selectbox("Past runs", list(options.keys()))
+            if st.button("Load selected run"):
+                st.session_state.current_run_id = options[picked_label]
+                st.session_state.current_run_record = load_run(options[picked_label])
+                # The Dashboard tab's content is built earlier in this same
+                # script pass (it's rendered above History), so without a
+                # forced rerun it would still show the OLD run for this pass
+                # — the user would have to click something else before the
+                # newly loaded run actually appeared. Rerunning immediately
+                # avoids that one-click lag.
+                st.session_state.just_loaded_run = True
+                st.rerun()
+
+    if st.session_state.pop("just_loaded_run", False):
+        st.toast("Run loaded — check the Dashboard tab.")
 
 
 if __name__ == "__main__":
