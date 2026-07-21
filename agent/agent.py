@@ -136,6 +136,29 @@ def _is_success_loop(anomaly: dict) -> bool:
     return False
 
 
+def _is_unproductive_read_loop(anomaly: dict) -> bool:
+    """True if an infinite_loop anomaly's repeating cycle consists entirely
+    of read_file calls — no write_file, no run_code.
+
+    A rollback-and-retry can't resolve this: re-reading unchanged content
+    produces no new information no matter how many times the agent is asked
+    to "try something different." Unlike _is_success_loop, this does NOT
+    mean the task is done — the file being read-looped on may genuinely
+    still be broken; the agent just isn't taking any action (write or run)
+    that could tell either way. Found live: a task whose only passing
+    run_code call was on a different, self-contained file never re-ran the
+    file it kept re-reading, then repeated the identical 3-read loop on
+    every one of 3 rollback attempts — the correction message never changed
+    the outcome. Escalating immediately instead of burning the full retry
+    budget on a guaranteed-identical repeat gives an honest signal (manual
+    review needed) instead of wasting rollbacks or guessing at success.
+    """
+    if anomaly.get("type") != "infinite_loop":
+        return False
+    tools_used = {tool for tool, _, _ in anomaly.get("repeated_signature", ())}
+    return tools_used == {"read_file"}
+
+
 def run_agent(task: str) -> dict:
     """Run the coding agent on a task, with full trajectory monitoring.
 
@@ -168,6 +191,7 @@ def run_agent(task: str) -> dict:
     agent = build_agent()
     messages = [{"role": "user", "content": task}]
     rollback_status = None
+    escalation_reason = None
     final_ai_message = ""
     pending_tool_call = None  # holds tool_used/input until the matching ToolMessage arrives
     # keyed by step_number; only populated for steps where a detector actually
@@ -264,6 +288,25 @@ def run_agent(task: str) -> dict:
                     produced_any_step = False  # signals the outer while loop to stop, not retry
                     break
 
+                # A loop whose repeating cycle is entirely read-only (no
+                # write_file, no run_code) can't be resolved by rolling back
+                # and retrying — re-reading unchanged content produces no
+                # new information no matter how many times the agent is
+                # asked to "try something different." Escalate immediately
+                # instead of burning the full retry budget on a guaranteed-
+                # identical repeat (see docs/unproductive_read_loop_fix.md).
+                read_loop = next((a for a in anomalies if _is_unproductive_read_loop(a)), None)
+                if read_loop:
+                    rollback_status = "escalated"
+                    escalation_reason = (
+                        f"The agent repeated the same read-only action "
+                        f"{read_loop.get('repetition_count', 'multiple')} times without writing "
+                        f"or running any code — retrying would just repeat identically. This may "
+                        f"mean the task is already complete, or that the agent needs a clearer "
+                        f"instruction to explicitly re-run and confirm its work."
+                    )
+                    break
+
                 severity = calculate_severity(anomalies)
                 if severity >= ROLLBACK_SEVERITY_THRESHOLD:
                     discarded_before = [s for s in logger.get_full_log() if not s["is_active"]]
@@ -298,7 +341,7 @@ def run_agent(task: str) -> dict:
             break  # the agent finished naturally with no new tool call
 
     final_trajectory = logger.get_active_trajectory()
-    result = finalize_run(final_trajectory, final_ai_message, rollback_status)
+    result = finalize_run(final_trajectory, final_ai_message, rollback_status, escalation_reason)
     result["trajectory"] = final_trajectory
     result["cost_summary"] = cost_tracker.summary()
     result["anomalies_by_step"] = anomalies_by_step

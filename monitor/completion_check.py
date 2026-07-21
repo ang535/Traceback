@@ -36,12 +36,15 @@ def verify_task_completion(trajectory: list) -> dict:
     return {"verified": True, "reason": None}
 
 
-def finalize_run(trajectory: list, agent_final_message: str, rollback_status: str = None) -> dict:
+def finalize_run(trajectory: list, agent_final_message: str, rollback_status: str = None,
+                  escalation_reason: str = None) -> dict:
     """Determine the final status of a task run.
 
     Three possible outcomes, each meaningfully different and shown distinctly
     on the dashboard:
-      - "escalated": the rollback manager hit its retry limit. Needs manual intervention.
+      - "escalated": the rollback manager hit its retry limit, or the run was
+                      halted directly for a reason retrying can't fix. Needs
+                      manual intervention.
       - "unverified": the agent believes it finished, but verify_task_completion disagrees.
       - "success": the agent finished AND the last run_code call exited clean.
 
@@ -50,6 +53,12 @@ def finalize_run(trajectory: list, agent_final_message: str, rollback_status: st
         agent_final_message: The agent's own final natural-language response.
         rollback_status: "escalated" if the rollback manager exceeded its
                           retry limit during this run, otherwise None.
+        escalation_reason: A specific explanation for why the run escalated,
+                            when the cause is more specific than exhausting
+                            the retry budget (e.g. an unproductive read-only
+                            loop — see agent.agent._is_unproductive_read_loop).
+                            Falls back to the generic retry-limit message if
+                            not given.
 
     Returns:
         A dict with "status", "message", and "warning" (only present if unverified).
@@ -58,7 +67,7 @@ def finalize_run(trajectory: list, agent_final_message: str, rollback_status: st
         return {
             "status": "escalated",
             "message": agent_final_message,
-            "warning": "Task exceeded the maximum number of automatic retries.",
+            "warning": escalation_reason or "Task exceeded the maximum number of automatic retries.",
         }
 
     verification = verify_task_completion(trajectory)
