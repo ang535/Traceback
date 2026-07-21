@@ -18,6 +18,7 @@ end — a reasonable next step if watching steps arrive live turns out to
 matter more than seeing the finished result quickly.
 """
 
+import html
 import os
 import sys
 
@@ -126,7 +127,35 @@ def render_run_detail(record: dict) -> None:
             "Tokens": step.get("token_count", 0),
             "Anomalies": ", ".join(a["type"] for a in step_anomalies) if step_anomalies else "",
         })
-    st.dataframe(table_rows, width="stretch", hide_index=True)
+
+    # st.dataframe doesn't support per-row conditional styling on its own —
+    # that needs a pandas Styler, which needs jinja2, an extra dependency
+    # not otherwise required anywhere in this project. A small hand-built
+    # HTML table avoids that dependency entirely and gives full control over
+    # the highlight; the tradeoff is losing st.dataframe's built-in sort/
+    # search/fullscreen/download controls for this one table.
+    _COLUMNS = ["Step", "Tool", "Input", "Output", "Tokens", "Anomalies"]
+    header_html = "".join(
+        f'<th style="text-align:left;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.4);">{col}</th>'
+        for col in _COLUMNS
+    )
+    body_rows_html = []
+    for row in table_rows:
+        row_bg = "background-color: rgba(255, 90, 90, 0.22);" if row["Anomalies"] else ""
+        cells_html = "".join(
+            f'<td style="padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.15);">{html.escape(str(row[col]))}</td>'
+            for col in _COLUMNS
+        )
+        body_rows_html.append(f'<tr style="{row_bg}">{cells_html}</tr>')
+
+    st.markdown(
+        f'<div style="overflow-x:auto;">'
+        f'<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">'
+        f'<thead><tr>{header_html}</tr></thead>'
+        f'<tbody>{"".join(body_rows_html)}</tbody>'
+        f'</table></div>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown("#### Tokens per step")
     # st.bar_chart stretches bars to fill the full chart width regardless of
@@ -166,16 +195,18 @@ def render_run_detail(record: dict) -> None:
 
     if rollback_history:
         st.markdown("#### Rollback history")
-        rollback_rows = [
-            {
-                "Attempt": r["attempt"],
-                "Rolled back to step": r["rollback_point"],
-                "Anomaly types": ", ".join(r["anomaly_types"]),
-                "Severity": round(r["severity"], 3),
-            }
-            for r in rollback_history
-        ]
-        st.dataframe(rollback_rows, width="stretch", hide_index=True)
+        st.caption("What went wrong on each attempt, and the corrective instruction sent back to the agent.")
+        # A plain dataframe can't fit the correction message (a full sentence)
+        # into a table cell without wrapping badly, so each attempt gets its
+        # own expander instead — summary line matches the old table's
+        # columns, correction_message goes in the body where there's room.
+        for r in rollback_history:
+            summary = (
+                f"Attempt {r['attempt']} — rolled back to step {r['rollback_point']} "
+                f"— {', '.join(r['anomaly_types'])} (severity {round(r['severity'], 3)})"
+            )
+            with st.expander(summary):
+                st.write(r.get("correction_message", "No correction message recorded for this attempt."))
 
 
 def main():

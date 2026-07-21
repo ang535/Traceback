@@ -206,6 +206,7 @@ class RollbackManager:
             "new_branch_id": new_branch_id,
             "anomaly_types": [a["type"] for a in anomalies],
             "severity": severity,
+            "correction_message": correction,
         })
 
         return {
